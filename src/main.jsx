@@ -63,7 +63,7 @@ async function getRadar() {
 }
 
 async function getForecast(lat, lon) {
-  const results = await Promise.all(
+  const settled = await Promise.allSettled(
     MODELS.map(async ([name, model]) => {
       const url = new URL(OPEN_METEO);
       url.searchParams.set("latitude", lat);
@@ -92,6 +92,13 @@ async function getForecast(lat, lon) {
     })
   );
 
+  // One model going down must not blank out the whole consensus panel.
+  const results = settled
+    .filter((entry) => entry.status === "fulfilled")
+    .map((entry) => entry.value);
+
+  if (!results.length) throw new Error("all forecast models failed");
+
   return results;
 }
 
@@ -108,6 +115,8 @@ function App() {
   const [models, setModels] = useState(null);
   const [loadingRadar, setLoadingRadar] = useState(true);
   const [error, setError] = useState("");
+  // Bumped on every manual refresh so the cached TMD composite is re-fetched.
+  const [stamp, setStamp] = useState(() => Date.now());
 
   useEffect(() => {
     const map = L.map("map", {
@@ -172,7 +181,10 @@ function App() {
 
     radarLayerRef.current = L.tileLayer(url, {
       opacity: 0.74,
-      maxZoom: 7,
+      // RainViewer serves radar tiles well past z8. maxNativeZoom lets Leaflet
+      // upscale the last real tile instead of hiding the layer entirely.
+      maxNativeZoom: 10,
+      maxZoom: 19,
       attribution:
         'Radar: <a href="https://www.rainviewer.com/" target="_blank" rel="noreferrer">RainViewer</a>',
     }).addTo(map);
@@ -189,12 +201,12 @@ function App() {
 
     if (source !== "tmd") return;
 
-    tmdLayerRef.current = L.imageOverlay(TMD_COMPOSITE, TMD_BOUNDS, {
+    tmdLayerRef.current = L.imageOverlay(`${TMD_COMPOSITE}?t=${stamp}`, TMD_BOUNDS, {
       opacity: 0.68,
       className: "tmd-overlay",
       attribution: 'Radar: <a href="https://weather.tmd.go.th/" target="_blank" rel="noreferrer">TMD</a>',
     }).addTo(map);
-  }, [source]);
+  }, [source, stamp]);
 
   useEffect(() => {
     if (!playing || frames.length < 2 || source !== "rainviewer") return;
@@ -231,6 +243,7 @@ function App() {
   }
 
   function updateAll() {
+    setStamp(Date.now());
     refreshRadar();
     refreshForecast();
   }
