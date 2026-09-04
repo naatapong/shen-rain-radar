@@ -1,1 +1,382 @@
-*{box-sizing:border-box}html,body,#root{margin:0;min-height:100%;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0b1220;color:#eef3f8}button{font:inherit}body{overflow-x:hidden}.app{min-height:100vh;display:flex;flex-direction:column}header{height:64px;display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#111b2d;border-bottom:1px solid #26334a}.brand{font-weight:800;letter-spacing:.4px}.sub{font-size:12px;color:#9eacc1;margin-top:2px}header button{border:0;background:#24334b;color:#fff;border-radius:12px;width:42px;height:42px}.sourcebar{display:flex;gap:8px;padding:9px 10px;background:#111b2d}.sourcebar button{flex:1;border:1px solid #2b3b55;background:#17243a;color:#cbd6e5;border-radius:10px;padding:9px 7px}.sourcebar button.active{background:#2b78ff;color:#fff;border-color:#2b78ff}.sourcebar button:last-child{flex:0 0 82px}main{position:relative;height:56vh;min-height:380px;background:#17202f}#map{width:100%;height:100%}.status,.legend{position:absolute;z-index:500;background:rgba(10,18,32,.86);backdrop-filter:blur(6px);border:1px solid #33445f;border-radius:10px;padding:7px 9px;font-size:12px}.status{top:10px;left:10px}.legend{bottom:10px;left:10px}.panel,.forecast,.notice{margin:10px;background:#111b2d;border:1px solid #26334a;border-radius:14px;padding:13px}.title{font-weight:800;margin-bottom:10px}.panel input{width:100%}.times{display:flex;justify-content:space-between;color:#9eacc1;font-size:11px;margin-top:5px}.times strong{color:#fff}.play{width:100%;margin-top:10px;border:0;border-radius:10px;padding:10px;background:#24334b;color:#fff}.big{font-size:18px;font-weight:800;margin-bottom:10px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}.hour{background:#17243a;border-radius:10px;padding:9px;display:flex;flex-direction:column;gap:3px}.hour b{font-size:12px}.hour span{font-size:16px;font-weight:800}.hour small{font-size:10px;color:#aab7c9}.confidence{margin-top:9px;font-size:12px}.confidence.high{color:#69d58b}.confidence.medium{color:#ffd166}.confidence.low{color:#ff8f8f}.modelnote,.notice p{font-size:11px;line-height:1.5;color:#9eacc1}.notice{border-color:#3b5275}.notice b{font-size:13px}.footer{padding:10px 14px 18px;color:#74839a;font-size:10px;line-height:1.4}.error{display:block;color:#ff8f8f;margin-bottom:5px}.leaflet-control-attribution{font-size:9px}.leaflet-container{background:#dbe4ee}.tmd-overlay{pointer-events:none}
+:root {
+  --bg: #0b1220;
+  --card: #111b2d;
+  --line: #26334a;
+  --ink: #eef3f8;
+  --muted: #9eacc1;
+  --faint: #74839a;
+  --accent: #2b78ff;
+
+  --dry: #7f8ea6;
+  --light: #4bb3f5;
+  --moderate: #ffd166;
+  --heavy: #ff8f4d;
+  --violent: #ff5b6e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+body {
+  overflow-x: hidden;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 18px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px;
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  font-weight: 800;
+  letter-spacing: 0.4px;
+}
+
+.sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 3px;
+}
+
+.tools {
+  display: flex;
+  gap: 8px;
+}
+
+.tools button {
+  border: 0;
+  background: #24334b;
+  color: #fff;
+  border-radius: 12px;
+  width: 42px;
+  height: 42px;
+  font-size: 17px;
+}
+
+/* Answer card ------------------------------------------------------------- */
+
+.answer {
+  margin: 0 10px;
+  padding: 16px;
+  border-radius: 16px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--dry);
+}
+
+.answer.light {
+  border-left-color: var(--light);
+}
+.answer.moderate {
+  border-left-color: var(--moderate);
+}
+.answer.heavy {
+  border-left-color: var(--heavy);
+}
+.answer.violent {
+  border-left-color: var(--violent);
+}
+
+.verdict {
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+}
+
+.measured {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.measured b {
+  color: var(--ink);
+}
+
+.outlook {
+  margin-top: 10px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.trust {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.trust.high {
+  color: #69d58b;
+}
+.trust.medium {
+  color: #ffd166;
+}
+.trust.low {
+  color: #ff8f8f;
+}
+
+/* Timeline ---------------------------------------------------------------- */
+
+.timeline {
+  margin: 0 10px;
+  padding: 14px 12px 10px;
+  border-radius: 16px;
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+
+.axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  margin-bottom: 10px;
+}
+
+.axis .measured {
+  margin: 0;
+  color: var(--muted);
+}
+
+.axis .forecast {
+  color: var(--faint);
+}
+
+.bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 96px;
+}
+
+.slot {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  height: 100%;
+}
+
+.track {
+  flex: 1;
+  width: 100%;
+  display: flex;
+  align-items: flex-end;
+  background: #17243a;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.bar {
+  width: 100%;
+  border-radius: 5px 5px 0 0;
+  background: var(--dry);
+}
+
+.bar.light {
+  background: var(--light);
+}
+.bar.moderate {
+  background: var(--moderate);
+}
+.bar.heavy {
+  background: var(--heavy);
+}
+.bar.violent {
+  background: var(--violent);
+}
+
+/* Forecast bars are hatched so a modelled value never reads as a measurement. */
+.bar.forecast {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(11, 18, 32, 0.45) 0 3px,
+    transparent 3px 6px
+  );
+}
+
+.slot span {
+  font-size: 9px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.now {
+  width: 2px;
+  align-self: stretch;
+  margin: 0 3px 16px;
+  background: var(--accent);
+  border-radius: 2px;
+}
+
+.scale {
+  margin-top: 8px;
+  font-size: 10px;
+  color: var(--faint);
+}
+
+/* A phone cannot fit fourteen time labels side by side, so thin them out. */
+@media (max-width: 560px) {
+  .slot:not(.tick) span {
+    visibility: hidden;
+  }
+}
+
+/* Map --------------------------------------------------------------------- */
+
+.mapcard {
+  margin: 0 10px;
+  border-radius: 16px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.maphead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 13px;
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.switch {
+  display: flex;
+  gap: 6px;
+}
+
+.switch button {
+  border: 1px solid #2b3b55;
+  background: #17243a;
+  color: var(--muted);
+  border-radius: 9px;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.switch button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.mapwrap {
+  position: relative;
+  height: 46vh;
+  min-height: 300px;
+  background: #17202f;
+}
+
+#map {
+  width: 100%;
+  height: 100%;
+}
+
+.stamp {
+  position: absolute;
+  z-index: 500;
+  top: 10px;
+  left: 10px;
+  background: rgba(10, 18, 32, 0.86);
+  backdrop-filter: blur(6px);
+  border: 1px solid #33445f;
+  border-radius: 10px;
+  padding: 6px 9px;
+  font-size: 11px;
+}
+
+.player {
+  padding: 12px 13px 14px;
+}
+
+.player input {
+  width: 100%;
+}
+
+.play {
+  width: 100%;
+  margin-top: 10px;
+  border: 0;
+  border-radius: 10px;
+  padding: 11px;
+  background: #24334b;
+  color: #fff;
+}
+
+.play:disabled {
+  opacity: 0.45;
+}
+
+.note {
+  margin: 0;
+  padding: 0 13px 14px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+/* Footnotes --------------------------------------------------------------- */
+
+.problems {
+  margin: 0 10px;
+  padding: 11px 13px;
+  border-radius: 12px;
+  background: #2a1620;
+  border: 1px solid #5c2b39;
+  color: #ff8f8f;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.footer {
+  padding: 4px 14px 0;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.6;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.leaflet-control-attribution {
+  font-size: 9px;
+}
+
+.leaflet-container {
+  background: #dbe4ee;
+}
+
+.tmd-overlay {
+  pointer-events: none;
+}

@@ -5,27 +5,20 @@ import "leaflet/dist/leaflet.css";
 import "./styles.css";
 
 const DEFAULT = { lat: 19.917, lon: 99.215, name: "ฝาง, เชียงใหม่" };
+
 const RAINVIEWER_META = "https://api.rainviewer.com/public/weather-maps.json";
 const RAINVIEWER_TILE = "https://tilecache.rainviewer.com";
 const OPEN_METEO = "https://api.open-meteo.com/v1/forecast";
+const THAIWATER = "https://api-v3.thaiwater.net/api/v1/thaiwater30/public";
 
 /*
  * TMD public composite image.
- * This is deliberately kept as an image overlay, not a guessed tile API.
  *
  * The published PNG is a full matplotlib figure, not a bare raster: it carries a
  * title, axis labels, a reflectivity colorbar and a white page background around
- * the plotted map. Dropping the whole figure on the map is what washed the
- * basemap out. The numbers below are the measured pixel box of the plot frame
- * inside the 1686x2070 figure, which lets us do two things:
- *
- *   1. place the figure by its own extent, so the plot frame lands on the
- *      latitudes and longitudes its axes actually claim, and
- *   2. clip everything outside the plot frame away in CSS.
- *
- * The remaining white page inside the frame is removed by compositing the layer
- * with multiply (see the tmd pane below), so only the radar echo and the grey
- * coverage rings darken the map.
+ * the plotted map. The numbers below are the measured pixel box of the plot
+ * frame inside the 1686x2070 figure, which lets us place the figure by its own
+ * axes and clip everything outside the plot away.
  */
 const TMD_COMPOSITE =
   "https://satda.tmd.go.th/wp-content/uploads/data/radar_composite/max/composite_th.png";
@@ -40,8 +33,7 @@ const LAT_PER_PX =
   (TMD_AXES.north - TMD_AXES.south) / (TMD_FRAME.bottom - TMD_FRAME.top);
 
 const TMD_WEST = TMD_AXES.west - TMD_FRAME.left * LON_PER_PX;
-const TMD_EAST =
-  TMD_AXES.east + (TMD_FIGURE.w - TMD_FRAME.right) * LON_PER_PX;
+const TMD_EAST = TMD_AXES.east + (TMD_FIGURE.w - TMD_FRAME.right) * LON_PER_PX;
 
 const mercator = (lat) =>
   Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360));
@@ -67,12 +59,9 @@ const TMD_BANDS = Array.from({ length: TMD_BAND_COUNT }, (_, i) => {
   const y0 = TMD_FRAME.top + (frameHeight * i) / TMD_BAND_COUNT;
   const y1 = TMD_FRAME.top + (frameHeight * (i + 1)) / TMD_BAND_COUNT;
 
-  // Latitudes this band of pixels represents, read off the figure's own axes.
   const latTop = TMD_AXES.north - (y0 - TMD_FRAME.top) * LAT_PER_PX;
   const latBottom = TMD_AXES.north - (y1 - TMD_FRAME.top) * LAT_PER_PX;
 
-  // Solve for the bounds that make rows y0..y1 land on latTop..latBottom once
-  // Leaflet has stretched the whole figure across them in projected space.
   const a = y0 / TMD_FIGURE.h;
   const b = y1 / TMD_FIGURE.h;
   const span = (mercator(latBottom) - mercator(latTop)) / (b - a);
@@ -83,12 +72,6 @@ const TMD_BANDS = Array.from({ length: TMD_BAND_COUNT }, (_, i) => {
       [unmercator(yTop + span), TMD_WEST],
       [unmercator(yTop), TMD_EAST],
     ],
-    /*
-     * Keeps this band only, and trims the axis labels and colorbar sideways.
-     * The bottom edge is carried one source pixel into the next band so that
-     * rounding between the separate image elements cannot open a hairline seam
-     * across the map.
-     */
     clip: `inset(${pct(y0 / TMD_FIGURE.h)} ${pct(
       (TMD_FIGURE.w - TMD_FRAME.right) / TMD_FIGURE.w
     )} ${pct(
@@ -103,35 +86,72 @@ const MODELS = [
   ["DWD ICON", "icon_seamless"],
 ];
 
-function fmt(ts) {
+const PAST_HOURS = 6;
+const FORECAST_STEPS = 8; // 8 x 15 minutes = the next two hours
+
+/*
+ * Every number in the app is a rain rate in mm per hour, so the measured past and
+ * the forecast can share one axis:
+ *   thaiwater rain_1h and rain_24h_graph are already mm accumulated over an hour
+ *   open-meteo minutely_15 is mm per 15 minutes, so it is multiplied by four
+ */
+const RATES = [
+  { limit: 0.1, label: "ไม่มีฝน", key: "dry" },
+  { limit: 2, label: "ฝนเบา", key: "light" },
+  { limit: 10, label: "ฝนปานกลาง", key: "moderate" },
+  { limit: 35, label: "ฝนหนัก", key: "heavy" },
+  { limit: Infinity, label: "ฝนหนักมาก", key: "violent" },
+];
+
+function rate(mmPerHour) {
+  return RATES.find((step) => mmPerHour < step.limit) ?? RATES[RATES.length - 1];
+}
+
+function clock(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "--:--";
   return new Intl.DateTimeFormat("th-TH", {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
-  }).format(new Date(ts * 1000));
+  }).format(date);
 }
 
 function median(values) {
-  const a = values.filter(Number.isFinite).sort((x, y) => x - y);
-  if (!a.length) return 0;
-  const m = Math.floor(a.length / 2);
-  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
-}
-
-function classify(totalMm) {
-  if (totalMm >= 10) return ["หนัก", "danger"];
-  if (totalMm >= 2) return ["ปานกลาง", "warn"];
-  if (totalMm > 0.1) return ["เล็กน้อย", "light"];
-  return ["ไม่มี/ต่ำ", "dry"];
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return 0;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
 function confidence(spread) {
-  if (spread <= 0.8) return ["สูง", "high"];
-  if (spread <= 2.5) return ["ปานกลาง", "medium"];
-  return ["ต่ำ", "low"];
+  if (spread <= 0.8) return { label: "สูง", key: "high" };
+  if (spread <= 2.5) return { label: "ปานกลาง", key: "medium" };
+  return { label: "ต่ำ", key: "low" };
 }
 
-async function getRadar() {
+function distanceKm(aLat, aLon, bLat, bLon) {
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(bLat - aLat);
+  const dLon = toRad(bLon - aLon);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLon / 2) ** 2;
+  return 2 * 6371 * Math.asin(Math.sqrt(h));
+}
+
+// thaiwater timestamps are plain Thailand local time, with no zone marker.
+function parseThaiTime(text) {
+  if (!text) return null;
+  const parts = text.trim().split(/[-: ]/).map(Number);
+  if (parts.length < 5 || parts.some(Number.isNaN)) return null;
+  const [year, month, day, hour, minute] = parts;
+  return new Date(year, month - 1, day, hour, minute);
+}
+
+async function getRadarFrames() {
   const response = await fetch(RAINVIEWER_META, { cache: "no-store" });
   if (!response.ok) throw new Error("RainViewer metadata failed");
   const data = await response.json();
@@ -144,11 +164,8 @@ async function getForecast(lat, lon) {
       const url = new URL(OPEN_METEO);
       url.searchParams.set("latitude", lat);
       url.searchParams.set("longitude", lon);
-      url.searchParams.set(
-        "hourly",
-        "rain,precipitation,precipitation_probability"
-      );
-      url.searchParams.set("forecast_hours", "3");
+      url.searchParams.set("minutely_15", "precipitation");
+      url.searchParams.set("forecast_minutely_15", String(FORECAST_STEPS));
       url.searchParams.set("timezone", "auto");
       url.searchParams.set("models", model);
 
@@ -158,24 +175,200 @@ async function getForecast(lat, lon) {
 
       return {
         name,
-        time: data.hourly?.time ?? [],
-        rain:
-          data.hourly?.rain ??
-          data.hourly?.precipitation ??
-          [],
-        prob: data.hourly?.precipitation_probability ?? [],
+        time: data.minutely_15?.time ?? [],
+        // mm per quarter hour on the wire, mm per hour everywhere in the app
+        rate: (data.minutely_15?.precipitation ?? []).map(
+          (value) => Number(value ?? 0) * 4
+        ),
       };
     })
   );
 
-  // One model going down must not blank out the whole consensus panel.
-  const results = settled
+  // One model going down must not blank out the whole outlook.
+  const models = settled
     .filter((entry) => entry.status === "fulfilled")
     .map((entry) => entry.value);
 
-  if (!results.length) throw new Error("all forecast models failed");
+  if (!models.length) throw new Error("all forecast models failed");
 
-  return results;
+  const steps = Math.min(...models.map((model) => model.rate.length));
+
+  const series = Array.from({ length: steps }, (_, i) => {
+    const values = models.map((model) => model.rate[i]);
+    return {
+      at: new Date(models[0].time[i]),
+      mmPerHour: median(values),
+      spread: Math.max(...values) - Math.min(...values),
+    };
+  });
+
+  return { models: models.map((model) => model.name), series };
+}
+
+/*
+ * The public station list is one 4 MB document covering the whole country, so it
+ * is fetched once per session and trimmed to what the app plots.
+ */
+let stationCache = null;
+
+async function getStations() {
+  if (stationCache) return stationCache;
+
+  const response = await fetch(`${THAIWATER}/rain_24h`);
+  if (!response.ok) throw new Error("thaiwater station list failed");
+  const data = await response.json();
+
+  stationCache = (data?.data ?? [])
+    .map((row) => ({
+      id: row.station?.id,
+      name: row.station?.tele_station_name?.th ?? "ไม่ทราบชื่อสถานี",
+      lat: Number(row.station?.tele_station_lat),
+      lon: Number(row.station?.tele_station_long),
+      province: row.geocode?.province_name?.th ?? "",
+      amphoe: row.geocode?.amphoe_name?.th ?? "",
+      agency: row.agency?.agency_shortname?.th ?? "",
+      mmPerHour: Number(row.rain_1h ?? 0),
+      mmPerDay: Number(row.rain_24h ?? 0),
+      at: parseThaiTime(row.rainfall_datetime),
+    }))
+    .filter(
+      (station) =>
+        station.id && Number.isFinite(station.lat) && Number.isFinite(station.lon)
+    );
+
+  return stationCache;
+}
+
+async function getStationHistory(stationId) {
+  const response = await fetch(
+    `${THAIWATER}/rain_24h_graph?station_id=${stationId}`
+  );
+  if (!response.ok) throw new Error("thaiwater station history failed");
+  const data = await response.json();
+
+  return (data?.data ?? [])
+    .map((row) => ({
+      at: parseThaiTime(row.rainfall_datetime),
+      mmPerHour: Number(row.rainfall_value ?? 0),
+    }))
+    .filter((row) => row.at)
+    .sort((a, b) => a.at - b.at);
+}
+
+async function getNearest(lat, lon) {
+  const stations = await getStations();
+
+  let nearest = null;
+  let best = Infinity;
+
+  for (const station of stations) {
+    const km = distanceKm(lat, lon, station.lat, station.lon);
+    if (km < best) {
+      best = km;
+      nearest = station;
+    }
+  }
+
+  if (!nearest) throw new Error("no station in range");
+
+  const history = await getStationHistory(nearest.id).catch(() => []);
+  return { ...nearest, km: best, history };
+}
+
+/*
+ * The headline answer. The measured reading is what the ground station is
+ * reporting right now; the outlook is where the model consensus first crosses
+ * into a different rain class, which is the thing worth telling someone.
+ */
+function summarise(station, forecast) {
+  const nowRate = station ? station.mmPerHour : forecast?.series?.[0]?.mmPerHour;
+  const now = rate(nowRate ?? 0);
+
+  if (!forecast?.series?.length) {
+    return { now, nowRate: nowRate ?? 0, outlook: null };
+  }
+
+  const change = forecast.series.find((step) => rate(step.mmPerHour).key !== now.key);
+
+  if (!change) {
+    return {
+      now,
+      nowRate: nowRate ?? 0,
+      outlook:
+        now.key === "dry"
+          ? "อีก 2 ชั่วโมงข้างหน้ายังไม่มีฝน"
+          : "อีก 2 ชั่วโมงข้างหน้าฝนยังแรงเท่าเดิม",
+    };
+  }
+
+  const minutes = Math.max(
+    15,
+    Math.round((change.at.getTime() - Date.now()) / 60000 / 15) * 15
+  );
+  const next = rate(change.mmPerHour);
+  const direction = change.mmPerHour > (nowRate ?? 0) ? "หนักขึ้นเป็น" : "เบาลงเป็น";
+
+  return {
+    now,
+    nowRate: nowRate ?? 0,
+    outlook:
+      next.key === "dry"
+        ? `อีก ${minutes} นาที ฝนหยุด`
+        : `อีก ${minutes} นาที ${direction}${next.label}`,
+  };
+}
+
+function Timeline({ station, forecast }) {
+  const past = useMemo(() => {
+    if (!station?.history?.length) return [];
+    return station.history.slice(-PAST_HOURS);
+  }, [station]);
+
+  const future = forecast?.series ?? [];
+  const peak = Math.max(
+    1,
+    ...past.map((row) => row.mmPerHour),
+    ...future.map((row) => row.mmPerHour)
+  );
+
+  if (!past.length && !future.length) return null;
+
+  /*
+   * On a phone the fourteen slots leave about 22px each, which is narrower than
+   * a "04:00" label, so only every second slot is marked as a tick and the rest
+   * drop their label under the narrow breakpoint.
+   */
+  const bar = (row, key, kind, position) => {
+    const height = Math.max(3, (row.mmPerHour / peak) * 100);
+    return (
+      <div className={`slot ${position % 2 === 0 ? "tick" : ""}`} key={key}>
+        <div className="track">
+          <div
+            className={`bar ${kind} ${rate(row.mmPerHour).key}`}
+            style={{ height: `${height}%` }}
+          />
+        </div>
+        <span>{clock(row.at)}</span>
+      </div>
+    );
+  };
+
+  return (
+    <section className="timeline">
+      <div className="axis">
+        <span className="measured">ตรวจวัด · ย้อนหลัง {PAST_HOURS} ชม.</span>
+        <span className="forecast">คาดการณ์ · 2 ชม. ข้างหน้า</span>
+      </div>
+
+      <div className="bars">
+        {past.map((row, i) => bar(row, `p${i}`, "measured", i))}
+        <div className="now" />
+        {future.map((row, i) => bar(row, `f${i}`, "forecast", past.length + i))}
+      </div>
+
+      <div className="scale">สูงสุดในกราฟ {peak.toFixed(1)} มม./ชม.</div>
+    </section>
+  );
 }
 
 function App() {
@@ -183,22 +376,22 @@ function App() {
   const radarLayerRef = useRef(null);
   const tmdLayerRef = useRef([]);
 
-  const [frames, setFrames] = useState([]);
-  const [idx, setIdx] = useState(-1);
   const [loc, setLoc] = useState(DEFAULT);
   const [source, setSource] = useState("rainviewer");
+  const [frames, setFrames] = useState([]);
+  const [idx, setIdx] = useState(-1);
   const [playing, setPlaying] = useState(false);
-  const [models, setModels] = useState(null);
-  const [loadingRadar, setLoadingRadar] = useState(true);
-  const [error, setError] = useState("");
-  // Bumped on every manual refresh so the cached TMD composite is re-fetched.
+  const [station, setStation] = useState(null);
+  const [forecast, setForecast] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [notes, setNotes] = useState([]);
   const [stamp, setStamp] = useState(() => Date.now());
 
   useEffect(() => {
-    const map = L.map("map", {
-      zoomControl: false,
-      preferCanvas: true,
-    }).setView([DEFAULT.lat, DEFAULT.lon], 8);
+    const map = L.map("map", { zoomControl: false, preferCanvas: true }).setView(
+      [DEFAULT.lat, DEFAULT.lon],
+      8
+    );
 
     L.control.zoom({ position: "bottomright" }).addTo(map);
 
@@ -213,10 +406,10 @@ function App() {
      * inside Leaflet's overlay pane, which is its own stacking context and has
      * nothing behind it, so the white page would stay opaque.
      */
-    const tmdPane = map.createPane("tmd");
-    tmdPane.style.zIndex = "350";
-    tmdPane.style.mixBlendMode = "multiply";
-    tmdPane.style.pointerEvents = "none";
+    const pane = map.createPane("tmd");
+    pane.style.zIndex = "350";
+    pane.style.mixBlendMode = "multiply";
+    pane.style.pointerEvents = "none";
 
     mapRef.current = map;
 
@@ -226,32 +419,36 @@ function App() {
     };
   }, []);
 
-  async function refreshRadar() {
-    setLoadingRadar(true);
-    setError("");
-    try {
-      const past = await getRadar();
-      setFrames(past);
-      setIdx(past.length ? past.length - 1 : -1);
-    } catch {
-      setError("โหลด RainViewer ไม่สำเร็จ");
-    } finally {
-      setLoadingRadar(false);
-    }
-  }
+  async function load(lat = loc.lat, lon = loc.lon) {
+    setLoading(true);
+    const problems = [];
 
-  async function refreshForecast(lat = loc.lat, lon = loc.lon) {
-    try {
-      setModels(await getForecast(lat, lon));
-    } catch {
-      setModels(null);
-      setError("โหลด forecast model ไม่สำเร็จ");
+    const [radar, outlook, nearest] = await Promise.allSettled([
+      getRadarFrames(),
+      getForecast(lat, lon),
+      getNearest(lat, lon),
+    ]);
+
+    if (radar.status === "fulfilled") {
+      setFrames(radar.value);
+      setIdx(radar.value.length ? radar.value.length - 1 : -1);
+    } else {
+      problems.push("โหลดภาพเรดาร์ RainViewer ไม่ได้");
     }
+
+    if (outlook.status === "fulfilled") setForecast(outlook.value);
+    else problems.push("โหลดโมเดลพยากรณ์ไม่ได้");
+
+    if (nearest.status === "fulfilled") setStation(nearest.value);
+    else problems.push("โหลดสถานีวัดน้ำฝนไม่ได้");
+
+    setNotes(problems);
+    setLoading(false);
   }
 
   useEffect(() => {
-    refreshRadar();
-    refreshForecast();
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -267,24 +464,22 @@ function App() {
 
     if (idx < 0 || !frames[idx] || source !== "rainviewer") return;
 
-    const frame = frames[idx];
-    const url =
-      `${RAINVIEWER_TILE}${frame.path}/256/{z}/{x}/{y}/2/1_1.png`;
-
-    radarLayerRef.current = L.tileLayer(url, {
-      opacity: 0.74,
-      /*
-       * The public RainViewer tile service stops at z7 — past that it answers
-       * 200 with a "Zoom Level Not Supported" placeholder rather than an error.
-       * Capping the layer at maxZoom 7 hid it entirely at the z8 default view,
-       * so use maxNativeZoom instead: Leaflet keeps drawing the z7 tiles and
-       * upscales them as the user zooms in.
-       */
-      maxNativeZoom: 7,
-      maxZoom: 19,
-      attribution:
-        'Radar: <a href="https://www.rainviewer.com/" target="_blank" rel="noreferrer">RainViewer</a>',
-    }).addTo(map);
+    radarLayerRef.current = L.tileLayer(
+      `${RAINVIEWER_TILE}${frames[idx].path}/256/{z}/{x}/{y}/2/1_1.png`,
+      {
+        opacity: 0.74,
+        /*
+         * The public RainViewer tile service stops at z7 — past that it answers
+         * 200 with a "Zoom Level Not Supported" placeholder rather than an
+         * error, which is what used to paint that text across the map. Capping
+         * maxNativeZoom keeps Leaflet on the z7 tiles and upscales them.
+         */
+        maxNativeZoom: 7,
+        maxZoom: 19,
+        attribution:
+          'เรดาร์: <a href="https://www.rainviewer.com/" target="_blank" rel="noreferrer">RainViewer</a>',
+      }
+    ).addTo(map);
   }, [frames, idx, source]);
 
   useEffect(() => {
@@ -305,10 +500,9 @@ function App() {
         // black, so hold the layer back a little to keep the basemap readable.
         opacity: 0.75,
         className: "tmd-overlay",
-        // Only one band carries the credit, otherwise it is counted six times.
         attribution:
           i === 0
-            ? 'Radar: <a href="https://weather.tmd.go.th/" target="_blank" rel="noreferrer">TMD</a>'
+            ? 'เรดาร์: <a href="https://weather.tmd.go.th/" target="_blank" rel="noreferrer">กรมอุตุนิยมวิทยา</a>'
             : undefined,
       }).addTo(map);
 
@@ -336,7 +530,10 @@ function App() {
   }, [playing, frames.length, source]);
 
   function locate() {
-    if (!navigator.geolocation) return;
+    if (!navigator.geolocation) {
+      setNotes(["เครื่องนี้ไม่รองรับการอ่านตำแหน่ง"]);
+      return;
+    }
 
     navigator.geolocation.getCurrentPosition(
       (position) => {
@@ -346,171 +543,148 @@ function App() {
           name: "ตำแหน่งของฉัน",
         };
         setLoc(next);
-        mapRef.current?.setView([next.lat, next.lon], 10);
-        refreshForecast(next.lat, next.lon);
+        mapRef.current?.setView([next.lat, next.lon], 9);
+        load(next.lat, next.lon);
       },
-      () => setError("ไม่สามารถอ่านตำแหน่งของเครื่องได้")
+      () => setNotes(["อ่านตำแหน่งของเครื่องไม่ได้"])
     );
   }
 
-  function updateAll() {
+  function refresh() {
     setStamp(Date.now());
-    refreshRadar();
-    refreshForecast();
+    load();
   }
 
-  const consensus = useMemo(() => {
-    if (!models?.length) return [];
-
-    const len = Math.min(
-      3,
-      ...models.map((model) => model.rain.length)
-    );
-
-    return Array.from({ length: len }, (_, i) => {
-      const values = models.map((model) => Number(model.rain[i] ?? 0));
-      const probs = models.map((model) => Number(model.prob[i] ?? 0));
-
-      return {
-        time: new Date(models[0].time[i]).getTime(),
-        mm: median(values),
-        prob: Math.round(median(probs)),
-        spread: Math.max(...values) - Math.min(...values),
-      };
-    });
-  }, [models]);
-
-  const total = consensus.reduce((sum, item) => sum + item.mm, 0);
-  const status = classify(total);
-  const maxSpread = consensus.length
-    ? Math.max(...consensus.map((item) => item.spread))
+  const summary = useMemo(() => summarise(station, forecast), [station, forecast]);
+  const spread = forecast?.series?.length
+    ? Math.max(...forecast.series.map((step) => step.spread))
     : 0;
-  const confidenceResult = confidence(maxSpread);
+  const trust = confidence(spread);
 
   return (
     <div className="app">
       <header>
         <div>
-          <div className="brand">🌧️ SHEN RAIN RADAR</div>
+          <div className="brand">SHEN RAIN RADAR</div>
           <div className="sub">{loc.name}</div>
         </div>
-        <button onClick={locate} aria-label="ตำแหน่งของฉัน">
-          📍
-        </button>
+        <div className="tools">
+          <button onClick={locate} aria-label="ใช้ตำแหน่งของฉัน">
+            📍
+          </button>
+          <button onClick={refresh} aria-label="อัปเดตข้อมูล">
+            ↻
+          </button>
+        </div>
       </header>
 
-      <div className="sourcebar">
-        <button
-          className={source === "rainviewer" ? "active" : ""}
-          onClick={() => setSource("rainviewer")}
-        >
-          Radar
-        </button>
-        <button
-          className={source === "tmd" ? "active" : ""}
-          onClick={() => setSource("tmd")}
-        >
-          TMD
-        </button>
-        <button onClick={updateAll}>↻ อัปเดต</button>
-      </div>
+      <section className={`answer ${summary.now.key}`}>
+        {loading && !station ? (
+          <div className="verdict">กำลังโหลด…</div>
+        ) : (
+          <>
+            <div className="verdict">{summary.now.label}</div>
 
-      <main>
-        <div id="map" />
-        <div className="status">
-          {source === "tmd"
-            ? "TMD Radar Composite"
-            : loadingRadar
-              ? "กำลังโหลด…"
-              : idx >= 0
-                ? `Radar ${fmt(frames[idx].time)}`
-                : "ไม่มีข้อมูล"}
-        </div>
-        <div className="legend">
-          {source === "tmd"
-            ? "🟩 ฝนอ่อน　🟨 ปานกลาง　🟥 ฝนหนัก"
-            : "🟦 ฝนอ่อน　🟨 ปานกลาง　🟥 ฝนหนัก"}
-        </div>
-      </main>
+            {station ? (
+              <div className="measured">
+                {station.name}
+                {station.amphoe ? ` อ.${station.amphoe}` : ""} ห่าง{" "}
+                {station.km.toFixed(0)} กม. วัดได้{" "}
+                <b>{station.mmPerHour.toFixed(1)} มม./ชม.</b>
+                {station.at ? ` เมื่อ ${clock(station.at)}` : ""}
+              </div>
+            ) : (
+              <div className="measured">ไม่มีสถานีวัดน้ำฝนใกล้เคียง</div>
+            )}
 
-      {source === "tmd" && (
-        <section className="notice">
-          <b>กรมอุตุนิยมวิทยา (TMD) — Radar Composite</b>
-          <p>
-            แสดงภาพเรดาร์ composite ของประเทศไทยเป็น overlay บนแผนที่โดยตรง
-            ค่าสีคือ reflectivity (dBZ) เขียว = ฝนอ่อน เหลือง-ส้ม = ปานกลาง
-            แดง-ม่วง = หนัก ส่วนพื้นเทาจาง ๆ คือขอบเขตที่เรดาร์ครอบคลุมแต่ไม่พบฝน
-            ส่วน animation ของ RainViewer ยังแยกไว้ในแท็บ Radar
-            เพราะรูปแบบข้อมูลของสองแหล่งไม่เหมือนกัน
-          </p>
-        </section>
-      )}
+            {summary.outlook && <div className="outlook">{summary.outlook}</div>}
 
-      <section className="panel">
-        <div className="title">Radar ย้อนหลัง</div>
-        <input
-          type="range"
-          min="0"
-          max={Math.max(0, frames.length - 1)}
-          value={Math.max(0, idx)}
-          onChange={(event) => setIdx(Number(event.target.value))}
-          disabled={!frames.length || source !== "rainviewer"}
-        />
-        <div className="times">
-          <span>{frames[0] ? fmt(frames[0].time) : "--:--"}</span>
-          <strong>
-            {frames[idx] ? fmt(frames[idx].time) : "--:--"}
-          </strong>
-          <span>
-            {frames.at(-1) ? fmt(frames.at(-1).time) : "--:--"}
-          </span>
-        </div>
-        <button
-          className="play"
-          disabled={source !== "rainviewer" || frames.length < 2}
-          onClick={() => setPlaying((value) => !value)}
-        >
-          {playing ? "⏸ หยุด" : "▶ เล่น Animation"}
-        </button>
-      </section>
-
-      <section className="forecast">
-        <div className="title">แนวโน้มฝน 0–2 ชั่วโมงข้างหน้า</div>
-        <div className="big">
-          {models
-            ? `${status[0]} · median ${total.toFixed(1)} mm`
-            : "กำลังโหลด…"}
-        </div>
-
-        <div className={`confidence ${confidenceResult[1]}`}>
-          ความเห็นของโมเดล: <b>{confidenceResult[0]}</b>
-          {models ? ` · spread สูงสุด ${maxSpread.toFixed(1)} mm` : ""}
-        </div>
-
-        <div className="grid">
-          {consensus.map((item, i) => (
-            <div className="hour" key={i}>
-              <b>{fmt(item.time / 1000)}</b>
-              <span>{item.mm.toFixed(1)} mm</span>
-              <small>โอกาส {item.prob}%</small>
-              <small>ต่างกัน {item.spread.toFixed(1)} mm</small>
-            </div>
-          ))}
-        </div>
-
-        {models && (
-          <div className="modelnote">
-            ใช้ ECMWF IFS + NOAA GFS + DWD ICON ผ่าน Open-Meteo
-            แล้วคำนวณค่ากลาง (median) และความแตกต่างระหว่างโมเดล
-            เพื่อสื่อระดับความมั่นใจ ไม่ใช่การรับรองความแม่นยำ
-          </div>
+            {forecast && (
+              <div className={`trust ${trust.key}`}>
+                โมเดลเห็นตรงกัน: {trust.label} · ต่างกันสูงสุด{" "}
+                {spread.toFixed(1)} มม./ชม.
+              </div>
+            )}
+          </>
         )}
       </section>
 
+      <Timeline station={station} forecast={forecast} />
+
+      <section className="mapcard">
+        <div className="maphead">
+          <span>แผนที่ฝน</span>
+          <div className="switch">
+            <button
+              className={source === "rainviewer" ? "active" : ""}
+              onClick={() => setSource("rainviewer")}
+            >
+              RainViewer
+            </button>
+            <button
+              className={source === "tmd" ? "active" : ""}
+              onClick={() => setSource("tmd")}
+            >
+              TMD
+            </button>
+          </div>
+        </div>
+
+        <div className="mapwrap">
+          <div id="map" />
+          <div className="stamp">
+            {source === "tmd"
+              ? "ภาพ composite ล่าสุดของกรมอุตุฯ"
+              : idx >= 0 && frames[idx]
+                ? `เรดาร์ ${clock(frames[idx].time * 1000)}`
+                : "ไม่มีภาพเรดาร์"}
+          </div>
+        </div>
+
+        {source === "rainviewer" ? (
+          <div className="player">
+            <input
+              type="range"
+              min="0"
+              max={Math.max(0, frames.length - 1)}
+              value={Math.max(0, idx)}
+              onChange={(event) => setIdx(Number(event.target.value))}
+              disabled={frames.length < 2}
+            />
+            <button
+              className="play"
+              disabled={frames.length < 2}
+              onClick={() => setPlaying((value) => !value)}
+            >
+              {playing ? "⏸ หยุด" : "▶ เล่นย้อนหลัง 2 ชม."}
+            </button>
+          </div>
+        ) : (
+          <p className="note">
+            ภาพจากกรมอุตุนิยมวิทยาเป็นภาพนิ่งภาพเดียว ไม่มี animation
+            สีเขียวคือฝนอ่อน เหลืองถึงส้มคือปานกลาง แดงถึงม่วงคือหนัก
+            พื้นเทาจาง ๆ คือพื้นที่ที่เรดาร์ครอบคลุมแต่ไม่พบฝน
+          </p>
+        )}
+      </section>
+
+      {notes.length > 0 && (
+        <section className="problems">
+          {notes.map((note) => (
+            <div key={note}>{note}</div>
+          ))}
+        </section>
+      )}
+
       <footer className="footer">
-        {error && <span className="error">{error}</span>}
-        Radar: RainViewer · TMD Composite · Forecast:
-        ECMWF / GFS / ICON via Open-Meteo
+        <div>
+          ตรวจวัด: สถานีโทรมาตรผ่าน คลังข้อมูลน้ำแห่งชาติ (สสน.) ·
+          เรดาร์: RainViewer และกรมอุตุนิยมวิทยา
+        </div>
+        <div>
+          คาดการณ์: ค่ากลางของ {MODELS.map(([name]) => name).join(" / ")}{" "}
+          ผ่าน Open-Meteo — เป็นผลจากโมเดล ไม่ใช่การรับรองความแม่นยำ
+        </div>
       </footer>
     </div>
   );
