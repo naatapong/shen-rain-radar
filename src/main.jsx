@@ -12,14 +12,90 @@ const OPEN_METEO = "https://api.open-meteo.com/v1/forecast";
 /*
  * TMD public composite image.
  * This is deliberately kept as an image overlay, not a guessed tile API.
- * Bounds are the geographic extent of the published Thailand composite.
+ *
+ * The published PNG is a full matplotlib figure, not a bare raster: it carries a
+ * title, axis labels, a reflectivity colorbar and a white page background around
+ * the plotted map. Dropping the whole figure on the map is what washed the
+ * basemap out. The numbers below are the measured pixel box of the plot frame
+ * inside the 1686x2070 figure, which lets us do two things:
+ *
+ *   1. place the figure by its own extent, so the plot frame lands on the
+ *      latitudes and longitudes its axes actually claim, and
+ *   2. clip everything outside the plot frame away in CSS.
+ *
+ * The remaining white page inside the frame is removed by compositing the layer
+ * with multiply (see the tmd pane below), so only the radar echo and the grey
+ * coverage rings darken the map.
  */
 const TMD_COMPOSITE =
   "https://satda.tmd.go.th/wp-content/uploads/data/radar_composite/max/composite_th.png";
-const TMD_BOUNDS = [
-  [3.0, 94.0],
-  [23.0, 108.0],
-];
+
+const TMD_FIGURE = { w: 1686, h: 2070 };
+const TMD_FRAME = { left: 135, right: 1395, top: 88, bottom: 1936 };
+const TMD_AXES = { west: 94, east: 108, south: 3, north: 23 };
+
+const LON_PER_PX =
+  (TMD_AXES.east - TMD_AXES.west) / (TMD_FRAME.right - TMD_FRAME.left);
+const LAT_PER_PX =
+  (TMD_AXES.north - TMD_AXES.south) / (TMD_FRAME.bottom - TMD_FRAME.top);
+
+const TMD_WEST = TMD_AXES.west - TMD_FRAME.left * LON_PER_PX;
+const TMD_EAST =
+  TMD_AXES.east + (TMD_FIGURE.w - TMD_FRAME.right) * LON_PER_PX;
+
+const mercator = (lat) =>
+  Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360));
+const unmercator = (y) =>
+  ((2 * Math.atan(Math.exp(y)) - Math.PI / 2) * 180) / Math.PI;
+
+const pct = (value) => `${(value * 100).toFixed(4)}%`;
+
+/*
+ * The figure has linear latitude axes, but Leaflet draws an image overlay in Web
+ * Mercator, so a single overlay spanning 3N to 23N misplaces the echo by up to
+ * 23 km in the middle of the country. Splitting the plot into horizontal bands
+ * and giving each band its own bounds keeps the error inside one radar pixel:
+ * six bands leave about 1 km, which is the resolution of the source data.
+ *
+ * Every band draws the same image and is clipped to its own rows, so the browser
+ * still fetches and decodes one file.
+ */
+const TMD_BAND_COUNT = 6;
+
+const TMD_BANDS = Array.from({ length: TMD_BAND_COUNT }, (_, i) => {
+  const frameHeight = TMD_FRAME.bottom - TMD_FRAME.top;
+  const y0 = TMD_FRAME.top + (frameHeight * i) / TMD_BAND_COUNT;
+  const y1 = TMD_FRAME.top + (frameHeight * (i + 1)) / TMD_BAND_COUNT;
+
+  // Latitudes this band of pixels represents, read off the figure's own axes.
+  const latTop = TMD_AXES.north - (y0 - TMD_FRAME.top) * LAT_PER_PX;
+  const latBottom = TMD_AXES.north - (y1 - TMD_FRAME.top) * LAT_PER_PX;
+
+  // Solve for the bounds that make rows y0..y1 land on latTop..latBottom once
+  // Leaflet has stretched the whole figure across them in projected space.
+  const a = y0 / TMD_FIGURE.h;
+  const b = y1 / TMD_FIGURE.h;
+  const span = (mercator(latBottom) - mercator(latTop)) / (b - a);
+  const yTop = mercator(latTop) - a * span;
+
+  return {
+    bounds: [
+      [unmercator(yTop + span), TMD_WEST],
+      [unmercator(yTop), TMD_EAST],
+    ],
+    /*
+     * Keeps this band only, and trims the axis labels and colorbar sideways.
+     * The bottom edge is carried one source pixel into the next band so that
+     * rounding between the separate image elements cannot open a hairline seam
+     * across the map.
+     */
+    clip: `inset(${pct(y0 / TMD_FIGURE.h)} ${pct(
+      (TMD_FIGURE.w - TMD_FRAME.right) / TMD_FIGURE.w
+    )} ${pct(
+      (TMD_FIGURE.h - Math.min(y1 + 1, TMD_FRAME.bottom)) / TMD_FIGURE.h
+    )} ${pct(TMD_FRAME.left / TMD_FIGURE.w)})`,
+  };
+});
 
 const MODELS = [
   ["ECMWF IFS", "ecmwf_ifs025"],
@@ -105,7 +181,7 @@ async function getForecast(lat, lon) {
 function App() {
   const mapRef = useRef(null);
   const radarLayerRef = useRef(null);
-  const tmdLayerRef = useRef(null);
+  const tmdLayerRef = useRef([]);
 
   const [frames, setFrames] = useState([]);
   const [idx, setIdx] = useState(-1);
@@ -130,6 +206,17 @@ function App() {
       maxZoom: 19,
       attribution: "© OpenStreetMap contributors",
     }).addTo(map);
+
+    /*
+     * The TMD figure gets its own pane so multiply blending has the basemap as
+     * its backdrop. Putting mix-blend-mode on the image instead would blend it
+     * inside Leaflet's overlay pane, which is its own stacking context and has
+     * nothing behind it, so the white page would stay opaque.
+     */
+    const tmdPane = map.createPane("tmd");
+    tmdPane.style.zIndex = "350";
+    tmdPane.style.mixBlendMode = "multiply";
+    tmdPane.style.pointerEvents = "none";
 
     mapRef.current = map;
 
@@ -169,11 +256,16 @@ function App() {
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || idx < 0 || !frames[idx] || source !== "rainviewer") return;
+    if (!map) return;
 
+    // Drop the old frame before deciding whether to draw a new one, otherwise
+    // switching to the TMD tab leaves the RainViewer frame stacked underneath.
     if (radarLayerRef.current) {
       radarLayerRef.current.remove();
+      radarLayerRef.current = null;
     }
+
+    if (idx < 0 || !frames[idx] || source !== "rainviewer") return;
 
     const frame = frames[idx];
     const url =
@@ -181,9 +273,14 @@ function App() {
 
     radarLayerRef.current = L.tileLayer(url, {
       opacity: 0.74,
-      // RainViewer serves radar tiles well past z8. maxNativeZoom lets Leaflet
-      // upscale the last real tile instead of hiding the layer entirely.
-      maxNativeZoom: 10,
+      /*
+       * The public RainViewer tile service stops at z7 — past that it answers
+       * 200 with a "Zoom Level Not Supported" placeholder rather than an error.
+       * Capping the layer at maxZoom 7 hid it entirely at the z8 default view,
+       * so use maxNativeZoom instead: Leaflet keeps drawing the z7 tiles and
+       * upscales them as the user zooms in.
+       */
+      maxNativeZoom: 7,
       maxZoom: 19,
       attribution:
         'Radar: <a href="https://www.rainviewer.com/" target="_blank" rel="noreferrer">RainViewer</a>',
@@ -194,18 +291,32 @@ function App() {
     const map = mapRef.current;
     if (!map) return;
 
-    if (tmdLayerRef.current) {
-      tmdLayerRef.current.remove();
-      tmdLayerRef.current = null;
-    }
+    tmdLayerRef.current.forEach((layer) => layer.remove());
+    tmdLayerRef.current = [];
 
     if (source !== "tmd") return;
 
-    tmdLayerRef.current = L.imageOverlay(`${TMD_COMPOSITE}?t=${stamp}`, TMD_BOUNDS, {
-      opacity: 0.68,
-      className: "tmd-overlay",
-      attribution: 'Radar: <a href="https://weather.tmd.go.th/" target="_blank" rel="noreferrer">TMD</a>',
-    }).addTo(map);
+    const url = `${TMD_COMPOSITE}?t=${stamp}`;
+
+    tmdLayerRef.current = TMD_BANDS.map((band, i) => {
+      const layer = L.imageOverlay(url, band.bounds, {
+        pane: "tmd",
+        // The figure's own coastlines and province borders multiply to solid
+        // black, so hold the layer back a little to keep the basemap readable.
+        opacity: 0.75,
+        className: "tmd-overlay",
+        // Only one band carries the credit, otherwise it is counted six times.
+        attribution:
+          i === 0
+            ? 'Radar: <a href="https://weather.tmd.go.th/" target="_blank" rel="noreferrer">TMD</a>'
+            : undefined,
+      }).addTo(map);
+
+      const image = layer.getElement();
+      if (image) image.style.clipPath = band.clip;
+
+      return layer;
+    });
   }, [source, stamp]);
 
   useEffect(() => {
@@ -316,7 +427,9 @@ function App() {
                 : "ไม่มีข้อมูล"}
         </div>
         <div className="legend">
-          🟦 ฝนอ่อน　🟨 ปานกลาง　🟥 ฝนหนัก
+          {source === "tmd"
+            ? "🟩 ฝนอ่อน　🟨 ปานกลาง　🟥 ฝนหนัก"
+            : "🟦 ฝนอ่อน　🟨 ปานกลาง　🟥 ฝนหนัก"}
         </div>
       </main>
 
@@ -324,9 +437,11 @@ function App() {
         <section className="notice">
           <b>กรมอุตุนิยมวิทยา (TMD) — Radar Composite</b>
           <p>
-            แสดงภาพเรดาร์ composite ของประเทศไทยเป็น overlay
-            บนแผนที่โดยตรง ส่วน animation ของ RainViewer
-            ยังแยกไว้ในแท็บ Radar เพราะรูปแบบข้อมูลของสองแหล่งไม่เหมือนกัน
+            แสดงภาพเรดาร์ composite ของประเทศไทยเป็น overlay บนแผนที่โดยตรง
+            ค่าสีคือ reflectivity (dBZ) เขียว = ฝนอ่อน เหลือง-ส้ม = ปานกลาง
+            แดง-ม่วง = หนัก ส่วนพื้นเทาจาง ๆ คือขอบเขตที่เรดาร์ครอบคลุมแต่ไม่พบฝน
+            ส่วน animation ของ RainViewer ยังแยกไว้ในแท็บ Radar
+            เพราะรูปแบบข้อมูลของสองแหล่งไม่เหมือนกัน
           </p>
         </section>
       )}
