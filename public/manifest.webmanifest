@@ -1,9 +1,19 @@
 {
+  "id": "/",
   "name": "SHEN RAIN RADAR",
   "short_name": "Shen Radar",
+  "description": "ฝนตกที่นี่ไหม และอีกสองชั่วโมงข้างหน้าเป็นอย่างไร จากสถานีวัดน้ำฝน เรดาร์ และโมเดลพยากรณ์",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
+  "orientation": "portrait",
   "background_color": "#0b1220",
   "theme_color": "#0b1220",
-  "lang": "th"
+  "lang": "th",
+  "dir": "ltr",
+  "categories": ["weather", "utilities"],
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icon-maskable.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
 }

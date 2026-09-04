@@ -3,14 +3,47 @@ import { createRoot } from "react-dom/client";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { nowcast } from "./nowcast";
+import {
+  ageLabel,
+  ageMinutes,
+  clock,
+  combineForecastModels,
+  confidence,
+  distanceKm,
+  isStale,
+  parseThaiTime,
+  rate,
+  summarise,
+  STATION_NEAR_KM,
+} from "./weather";
 import "./styles.css";
 
 const DEFAULT = { lat: 19.917, lon: 99.215, name: "ฝาง, เชียงใหม่" };
+const SAVED_LOCATION = "shen-rain-location";
 
 const RAINVIEWER_META = "https://api.rainviewer.com/public/weather-maps.json";
 const RAINVIEWER_TILE = "https://tilecache.rainviewer.com";
 const OPEN_METEO = "https://api.open-meteo.com/v1/forecast";
 const THAIWATER = "https://api-v3.thaiwater.net/api/v1/thaiwater30/public";
+
+/*
+ * Refresh cadence, one per source rather than one for the app.
+ *
+ * RainViewer publishes a frame every ten minutes and the nowcast is the part
+ * that goes off fastest, so the radar is checked twice per publishing interval.
+ * The gauges report hourly and the models run every few hours, so pulling them
+ * on the same clock would be several times the traffic for no newer numbers.
+ *
+ * The timer only asks what is actually due, which also means returning to the
+ * tab after a while refreshes the stale half instead of firing everything.
+ */
+const RADAR_REFRESH_MS = 5 * 60_000;
+const GROUND_REFRESH_MS = 12 * 60_000;
+const DUE_CHECK_MS = 60_000;
+
+// How old each source may get before the app says so on the face of the card.
+const RADAR_STALE_MINUTES = 20;
+const STATION_STALE_MINUTES = 60;
 
 /*
  * TMD public composite image.
@@ -96,73 +129,74 @@ const FORECAST_STEPS = 8; // 8 x 15 minutes = the next two hours
  *   thaiwater rain_1h and rain_24h_graph are already mm accumulated over an hour
  *   open-meteo minutely_15 is mm per 15 minutes, so it is multiplied by four
  */
-const RATES = [
-  { limit: 0.1, label: "ไม่มีฝน", key: "dry" },
-  { limit: 2, label: "ฝนเบา", key: "light" },
-  { limit: 10, label: "ฝนปานกลาง", key: "moderate" },
-  { limit: 35, label: "ฝนหนัก", key: "heavy" },
-  { limit: Infinity, label: "ฝนหนักมาก", key: "violent" },
-];
 
-function rate(mmPerHour) {
-  return RATES.find((step) => mmPerHour < step.limit) ?? RATES[RATES.length - 1];
+const pause = (ms, signal) =>
+  new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(new Error("cancelled"));
+      },
+      { once: true }
+    );
+  });
+
+async function fetchWithTimeout(url, init = {}, timeout = 12_000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort("timeout"), timeout);
+  const abort = () => controller.abort("cancelled");
+  init.signal?.addEventListener("abort", abort, { once: true });
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+    init.signal?.removeEventListener("abort", abort);
+  }
 }
 
-function clock(value) {
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return "--:--";
-  return new Intl.DateTimeFormat("th-TH", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(date);
+/*
+ * Every outside source goes through here: a timeout, then one retry, and only
+ * for the transport failing or the server saying it broke. A 4xx is an answer
+ * and will not change on a second ask, and hammering a public source that is
+ * already struggling is how an app gets rate-limited off it.
+ */
+async function fetchJson(url, { signal, timeout, cache, retry = 1 } = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    let response;
+    try {
+      response = await fetchWithTimeout(url, { signal, cache }, timeout);
+    } catch (error) {
+      if (signal?.aborted || attempt >= retry) throw error;
+      await pause(700, signal);
+      continue;
+    }
+
+    if (response.status >= 500 && attempt < retry) {
+      await pause(700, signal);
+      continue;
+    }
+    if (!response.ok) throw new Error(`${url} answered ${response.status}`);
+
+    // A host without Functions answers the API path with the SPA shell, which
+    // parses as neither JSON nor an error. Treat it as the route being absent.
+    const type = response.headers.get("content-type") ?? "";
+    if (type.includes("text/html")) throw new Error(`${url} answered the app shell`);
+
+    return response.json();
+  }
 }
 
-function median(values) {
-  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
-  if (!sorted.length) return 0;
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2
-    ? sorted[middle]
-    : (sorted[middle - 1] + sorted[middle]) / 2;
-}
-
-function confidence(spread) {
-  if (spread <= 0.8) return { label: "สูง", key: "high" };
-  if (spread <= 2.5) return { label: "ปานกลาง", key: "medium" };
-  return { label: "ต่ำ", key: "low" };
-}
-
-function distanceKm(aLat, aLon, bLat, bLon) {
-  const toRad = (deg) => (deg * Math.PI) / 180;
-  const dLat = toRad(bLat - aLat);
-  const dLon = toRad(bLon - aLon);
-  const h =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLon / 2) ** 2;
-  return 2 * 6371 * Math.asin(Math.sqrt(h));
-}
-
-// thaiwater timestamps are plain Thailand local time, with no zone marker.
-function parseThaiTime(text) {
-  if (!text) return null;
-  const parts = text.trim().split(/[-: ]/).map(Number);
-  if (parts.length < 5 || parts.some(Number.isNaN)) return null;
-  const [year, month, day, hour, minute] = parts;
-  return new Date(year, month - 1, day, hour, minute);
-}
-
-async function getRadarFrames() {
-  const response = await fetch(RAINVIEWER_META, { cache: "no-store" });
-  if (!response.ok) throw new Error("RainViewer metadata failed");
-  const data = await response.json();
+async function getRadarFrames(signal) {
+  const data = await fetchJson(RAINVIEWER_META, { signal, cache: "no-store" });
   return {
     host: data?.host ?? RAINVIEWER_TILE,
-    frames: data?.radar?.past ?? [],
+    frames: Array.isArray(data?.radar?.past) ? data.radar.past : [],
   };
 }
 
-async function getForecast(lat, lon) {
+async function getForecast(lat, lon, signal) {
   const settled = await Promise.allSettled(
     MODELS.map(async ([name, model]) => {
       const url = new URL(OPEN_METEO);
@@ -170,20 +204,21 @@ async function getForecast(lat, lon) {
       url.searchParams.set("longitude", lon);
       url.searchParams.set("minutely_15", "precipitation");
       url.searchParams.set("forecast_minutely_15", String(FORECAST_STEPS));
-      url.searchParams.set("timezone", "auto");
+      url.searchParams.set("timeformat", "unixtime");
+      url.searchParams.set("timezone", "GMT");
       url.searchParams.set("models", model);
 
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`${name} failed`);
-      const data = await response.json();
+      const data = await fetchJson(url, { signal });
 
       return {
         name,
-        time: data.minutely_15?.time ?? [],
-        // mm per quarter hour on the wire, mm per hour everywhere in the app
-        rate: (data.minutely_15?.precipitation ?? []).map(
-          (value) => Number(value ?? 0) * 4
-        ),
+        points: (data.minutely_15?.time ?? [])
+          .map((at, i) => ({
+            at: Number(at),
+            // mm per quarter hour on the wire, mm per hour everywhere in the app
+            rate: Number(data.minutely_15?.precipitation?.[i] ?? 0) * 4,
+          }))
+          .filter((point) => Number.isFinite(point.at) && Number.isFinite(point.rate)),
       };
     })
   );
@@ -195,34 +230,29 @@ async function getForecast(lat, lon) {
 
   if (!models.length) throw new Error("all forecast models failed");
 
-  const steps = Math.min(...models.map((model) => model.rate.length));
-
-  const series = Array.from({ length: steps }, (_, i) => {
-    const values = models.map((model) => model.rate[i]);
-    return {
-      at: new Date(models[0].time[i]),
-      mmPerHour: median(values),
-      spread: Math.max(...values) - Math.min(...values),
-    };
-  });
+  const series = combineForecastModels(models, FORECAST_STEPS);
+  if (!series.length) throw new Error("forecast models have no common time");
 
   return { models: models.map((model) => model.name), series };
 }
 
 /*
  * The public station list is one 4 MB document covering the whole country, so it
- * is fetched once per session and trimmed to what the app plots.
+ * is fetched at most once every few minutes and trimmed to what the app plots.
+ * It used to be held for the whole session, which quietly pinned the fallback
+ * path to whatever the gauges said when the tab was opened.
  */
+const STATION_CACHE_MS = 5 * 60_000;
 let stationCache = null;
 
-async function getStations() {
-  if (stationCache) return stationCache;
+async function getStations(signal) {
+  if (stationCache && Date.now() - stationCache.at < STATION_CACHE_MS) {
+    return stationCache.rows;
+  }
 
-  const response = await fetch(`${THAIWATER}/rain_24h`);
-  if (!response.ok) throw new Error("thaiwater station list failed");
-  const data = await response.json();
+  const data = await fetchJson(`${THAIWATER}/rain_24h`, { signal, timeout: 20_000 });
 
-  stationCache = (data?.data ?? [])
+  const rows = (data?.data ?? [])
     .map((row) => ({
       id: row.station?.id,
       name: row.station?.tele_station_name?.th ?? "ไม่ทราบชื่อสถานี",
@@ -240,15 +270,15 @@ async function getStations() {
         station.id && Number.isFinite(station.lat) && Number.isFinite(station.lon)
     );
 
-  return stationCache;
+  stationCache = { at: Date.now(), rows };
+  return rows;
 }
 
-async function getStationHistory(stationId) {
-  const response = await fetch(
-    `${THAIWATER}/rain_24h_graph?station_id=${stationId}`
+async function getStationHistory(stationId, signal) {
+  const data = await fetchJson(
+    `${THAIWATER}/rain_24h_graph?station_id=${encodeURIComponent(stationId)}`,
+    { signal }
   );
-  if (!response.ok) throw new Error("thaiwater station history failed");
-  const data = await response.json();
 
   return (data?.data ?? [])
     .map((row) => ({
@@ -265,24 +295,18 @@ async function getStationHistory(stationId) {
  * instead of the better part of a megabyte. It is absent under `vite dev` and on
  * any host without functions, so the direct route stays as a fallback.
  */
-async function getNearestFromEdge(lat, lon) {
-  const response = await fetch(`/api/stations?lat=${lat}&lon=${lon}&limit=1`);
-  if (!response.ok) throw new Error("station function unavailable");
-
-  const type = response.headers.get("content-type") ?? "";
-  if (!type.includes("application/json")) {
-    throw new Error("station function not deployed here");
-  }
-
-  const data = await response.json();
+async function getNearestFromEdge(lat, lon, signal) {
+  const data = await fetchJson(`/api/stations?lat=${lat}&lon=${lon}&limit=1`, {
+    signal,
+  });
   const station = data?.stations?.[0];
   if (!station) throw new Error("no station in range");
 
   return { ...station, at: parseThaiTime(station.at) };
 }
 
-async function getNearestFromSource(lat, lon) {
-  const stations = await getStations();
+async function getNearestFromSource(lat, lon, signal) {
+  const stations = await getStations(signal);
 
   let nearest = null;
   let best = Infinity;
@@ -299,56 +323,30 @@ async function getNearestFromSource(lat, lon) {
   return { ...nearest, km: best };
 }
 
-async function getNearest(lat, lon) {
-  const nearest = await getNearestFromEdge(lat, lon).catch(() =>
-    getNearestFromSource(lat, lon)
-  );
+async function getNearest(lat, lon, signal) {
+  const nearest = await getNearestFromEdge(lat, lon, signal).catch((error) => {
+    if (signal?.aborted) throw error;
+    return getNearestFromSource(lat, lon, signal);
+  });
 
-  const history = await getStationHistory(nearest.id).catch(() => []);
+  const history = await getStationHistory(nearest.id, signal).catch(() => []);
   return { ...nearest, history };
 }
 
 /*
- * The headline answer. The measured reading is what the ground station is
- * reporting right now; the outlook is where the model consensus first crosses
- * into a different rain class, which is the thing worth telling someone.
+ * Names the source the headline rests on, so a reading taken 40 km away is never
+ * read as "the rain here".
  */
-function summarise(station, forecast) {
-  const nowRate = station ? station.mmPerHour : forecast?.series?.[0]?.mmPerHour;
-  const now = rate(nowRate ?? 0);
-
-  if (!forecast?.series?.length) {
-    return { now, nowRate: nowRate ?? 0, outlook: null };
+function basisLine(basis, station) {
+  if (basis === "station") {
+    return `จากสถานีวัดน้ำฝนห่าง ${station.km.toFixed(0)} กม.`;
   }
-
-  const change = forecast.series.find((step) => rate(step.mmPerHour).key !== now.key);
-
-  if (!change) {
-    return {
-      now,
-      nowRate: nowRate ?? 0,
-      outlook:
-        now.key === "dry"
-          ? "อีก 2 ชั่วโมงข้างหน้ายังไม่มีฝน"
-          : "อีก 2 ชั่วโมงข้างหน้าฝนยังแรงเท่าเดิม",
-    };
+  if (basis === "radar") return "จากภาพเรดาร์เหนือจุดนี้";
+  if (basis === "station-far") {
+    return `จากสถานีวัดน้ำฝนห่าง ${station.km.toFixed(0)} กม. — ไม่มีเรดาร์มายืนยัน`;
   }
-
-  const minutes = Math.max(
-    15,
-    Math.round((change.at.getTime() - Date.now()) / 60000 / 15) * 15
-  );
-  const next = rate(change.mmPerHour);
-  const direction = change.mmPerHour > (nowRate ?? 0) ? "หนักขึ้นเป็น" : "เบาลงเป็น";
-
-  return {
-    now,
-    nowRate: nowRate ?? 0,
-    outlook:
-      next.key === "dry"
-        ? `อีก ${minutes} นาที ฝนหยุด`
-        : `อีก ${minutes} นาที ${direction}${next.label}`,
-  };
+  if (basis === "model") return "จากโมเดลพยากรณ์ — ยังไม่มีค่าตรวจวัดในบริเวณนี้";
+  return null;
 }
 
 /*
@@ -358,6 +356,19 @@ function summarise(station, forecast) {
  * certain there rather than merely say so in small print.
  */
 function DriftStrip({ drift }) {
+  // The radar refusing to guess is worth a line of its own. Dropping the strip
+  // silently left the card reading as though nothing were on the way.
+  if (drift && !drift.ok) {
+    return (
+      <section className="drift unavailable">
+        <div className="axis">
+          <span className="measured">เรดาร์ · ทิศทางกลุ่มฝน</span>
+        </div>
+        <div className="scale">ประเมินทิศทางจากเรดาร์ไม่ได้ — {drift.reason}</div>
+      </section>
+    );
+  }
+
   if (!drift?.steps?.length) return null;
 
   const marks = [30, 60, 90, 120];
@@ -458,18 +469,141 @@ function App() {
   const mapRef = useRef(null);
   const radarLayerRef = useRef(null);
   const tmdLayerRef = useRef([]);
+  const markerRef = useRef(null);
+
+  // One request counter and one controller per source, so a slow gauge lookup
+  // landing late cannot overwrite the radar for a location the user has since
+  // moved away from — and neither can hold the other up.
+  const radarSeq = useRef(0);
+  const groundSeq = useRef(0);
+  const radarAbort = useRef(null);
+  const groundAbort = useRef(null);
+  const radarFetched = useRef(0);
+  const groundFetched = useRef(0);
+
+  // The map is built once, so its click handler must reach the current loaders
+  // rather than the ones that existed on the first render.
+  const actions = useRef({});
 
   const [loc, setLoc] = useState(DEFAULT);
   const [source, setSource] = useState("rainviewer");
   const [frames, setFrames] = useState([]);
+  const [radarHost, setRadarHost] = useState(RAINVIEWER_TILE);
   const [idx, setIdx] = useState(-1);
   const [playing, setPlaying] = useState(false);
   const [station, setStation] = useState(null);
   const [forecast, setForecast] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [notes, setNotes] = useState([]);
+  const [radarBusy, setRadarBusy] = useState(true);
+  const [groundBusy, setGroundBusy] = useState(true);
+  const [notes, setNotes] = useState({});
   const [drift, setDrift] = useState(null);
   const [stamp, setStamp] = useState(() => Date.now());
+
+  // Ages are re-read from this rather than from Date.now() during render, so
+  // "8 นาทีที่แล้ว" actually counts up while the tab sits open.
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  function note(key, message) {
+    setNotes((old) => {
+      if ((old[key] ?? null) === (message ?? null)) return old;
+      const next = { ...old };
+      if (message) next[key] = message;
+      else delete next[key];
+      return next;
+    });
+  }
+
+  async function loadRadar(lat, lon) {
+    radarAbort.current?.abort();
+    const controller = new AbortController();
+    radarAbort.current = controller;
+    const seq = ++radarSeq.current;
+
+    setRadarBusy(true);
+    setDrift(null);
+
+    try {
+      const { host, frames: past } = await getRadarFrames(controller.signal);
+      if (seq !== radarSeq.current) return;
+
+      radarFetched.current = Date.now();
+      setRadarHost(host);
+      setFrames(past);
+      setIdx(past.length ? past.length - 1 : -1);
+      note("radar", null);
+
+      /*
+       * The extrapolation reads pixels out of a dozen tiles, so the map and the
+       * measured reading are already on screen before it starts.
+       */
+      const value = await nowcast({ frames: past, host, lat, lon }).catch(() => ({
+        ok: false,
+        reason: "โหลดภาพเรดาร์มาคำนวณไม่ได้",
+      }));
+      if (seq === radarSeq.current) setDrift(value);
+    } catch {
+      if (seq === radarSeq.current) note("radar", "โหลดภาพเรดาร์ RainViewer ไม่ได้");
+    } finally {
+      if (seq === radarSeq.current) setRadarBusy(false);
+    }
+  }
+
+  async function loadGround(lat, lon) {
+    groundAbort.current?.abort();
+    const controller = new AbortController();
+    groundAbort.current = controller;
+    const seq = ++groundSeq.current;
+
+    setGroundBusy(true);
+
+    const [outlook, nearest] = await Promise.allSettled([
+      getForecast(lat, lon, controller.signal),
+      getNearest(lat, lon, controller.signal),
+    ]);
+    if (seq !== groundSeq.current) return;
+
+    groundFetched.current = Date.now();
+
+    if (outlook.status === "fulfilled") {
+      setForecast(outlook.value);
+      note("forecast", null);
+    } else {
+      note("forecast", "โหลดโมเดลพยากรณ์ไม่ได้ — ใช้ค่าที่ดึงมาได้ล่าสุด");
+    }
+
+    if (nearest.status === "fulfilled") {
+      setStation(nearest.value);
+      note("station", null);
+    } else {
+      note("station", "โหลดสถานีวัดน้ำฝนไม่ได้ — ใช้ค่าที่ดึงมาได้ล่าสุด");
+    }
+
+    setGroundBusy(false);
+  }
+
+  function load(lat = loc.lat, lon = loc.lon) {
+    loadRadar(lat, lon);
+    loadGround(lat, lon);
+  }
+
+  function pick(next, zoom = 9) {
+    setLoc(next);
+    try {
+      localStorage.setItem(SAVED_LOCATION, JSON.stringify(next));
+    } catch {
+      /* private browsing: the choice just does not survive a reload */
+    }
+    const map = mapRef.current;
+    if (map) map.setView([next.lat, next.lon], Math.max(map.getZoom(), zoom));
+    load(next.lat, next.lon);
+  }
+
+  actions.current = { load, loadRadar, loadGround, pick };
 
   useEffect(() => {
     const map = L.map("map", { zoomControl: false, preferCanvas: true }).setView(
@@ -496,6 +630,13 @@ function App() {
     pane.style.pointerEvents = "none";
 
     mapRef.current = map;
+    map.on("click", (event) => {
+      actions.current.pick({
+        lat: event.latlng.lat,
+        lon: event.latlng.lng,
+        name: "จุดที่เลือกบนแผนที่",
+      });
+    });
 
     return () => {
       map.remove();
@@ -503,48 +644,58 @@ function App() {
     };
   }, []);
 
-  async function load(lat = loc.lat, lon = loc.lon) {
-    setLoading(true);
-    setDrift(null);
-    const problems = [];
-
-    const [radar, outlook, nearest] = await Promise.allSettled([
-      getRadarFrames(),
-      getForecast(lat, lon),
-      getNearest(lat, lon),
-    ]);
-
-    if (radar.status === "fulfilled") {
-      const { host, frames: past } = radar.value;
-      setFrames(past);
-      setIdx(past.length ? past.length - 1 : -1);
-
-      /*
-       * The extrapolation reads pixels out of a dozen tiles, so it runs after
-       * the map and the measured reading are already on screen rather than
-       * holding them up.
-       */
-      nowcast({ frames: past, host, lat, lon })
-        .then(setDrift)
-        .catch(() => setDrift(null));
-    } else {
-      problems.push("โหลดภาพเรดาร์ RainViewer ไม่ได้");
-    }
-
-    if (outlook.status === "fulfilled") setForecast(outlook.value);
-    else problems.push("โหลดโมเดลพยากรณ์ไม่ได้");
-
-    if (nearest.status === "fulfilled") setStation(nearest.value);
-    else problems.push("โหลดสถานีวัดน้ำฝนไม่ได้");
-
-    setNotes(problems);
-    setLoading(false);
-  }
-
   useEffect(() => {
-    load();
+    let start = DEFAULT;
+    const saved = localStorage.getItem(SAVED_LOCATION);
+    if (saved) {
+      try {
+        const next = JSON.parse(saved);
+        if (Number.isFinite(next?.lat) && Number.isFinite(next?.lon)) {
+          start = next;
+          setLoc(next);
+          mapRef.current?.setView([next.lat, next.lon], 9);
+        }
+      } catch {
+        /* use the default location */
+      }
+    }
+    actions.current.load(start.lat, start.lon);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /*
+   * Each source is refreshed on its own clock, and only when it is actually due.
+   * Coming back to the tab runs the same check, so a tab left open for an hour
+   * catches up on both and a tab switched away for thirty seconds does nothing.
+   */
+  useEffect(() => {
+    const catchUp = () => {
+      if (document.visibilityState !== "visible") return;
+      const at = Date.now();
+      if (at - radarFetched.current >= RADAR_REFRESH_MS) {
+        actions.current.loadRadar(loc.lat, loc.lon);
+      }
+      if (at - groundFetched.current >= GROUND_REFRESH_MS) {
+        actions.current.loadGround(loc.lat, loc.lon);
+      }
+      setNow(at);
+    };
+
+    const timer = setInterval(catchUp, DUE_CHECK_MS);
+    document.addEventListener("visibilitychange", catchUp);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", catchUp);
+    };
+  }, [loc]);
+
+  useEffect(
+    () => () => {
+      radarAbort.current?.abort();
+      groundAbort.current?.abort();
+    },
+    []
+  );
 
   useEffect(() => {
     const map = mapRef.current;
@@ -560,7 +711,7 @@ function App() {
     if (idx < 0 || !frames[idx] || source !== "rainviewer") return;
 
     radarLayerRef.current = L.tileLayer(
-      `${RAINVIEWER_TILE}${frames[idx].path}/256/{z}/{x}/{y}/2/1_1.png`,
+      `${radarHost}${frames[idx].path}/256/{z}/{x}/{y}/2/1_1.png`,
       {
         opacity: 0.74,
         /*
@@ -575,7 +726,22 @@ function App() {
           'เรดาร์: <a href="https://www.rainviewer.com/" target="_blank" rel="noreferrer">RainViewer</a>',
       }
     ).addTo(map);
-  }, [frames, idx, source]);
+  }, [frames, idx, source, radarHost]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    markerRef.current?.remove();
+    markerRef.current = L.circleMarker([loc.lat, loc.lon], {
+      radius: 7,
+      color: "#fff",
+      weight: 2,
+      fillColor: "#2b78ff",
+      fillOpacity: 1,
+    })
+      .addTo(map)
+      .bindTooltip(loc.name, { direction: "top" });
+  }, [loc]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -626,22 +792,20 @@ function App() {
 
   function locate() {
     if (!navigator.geolocation) {
-      setNotes(["เครื่องนี้ไม่รองรับการอ่านตำแหน่ง"]);
+      note("locate", "เครื่องนี้ไม่รองรับการอ่านตำแหน่ง");
       return;
     }
 
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        const next = {
+        note("locate", null);
+        actions.current.pick({
           lat: position.coords.latitude,
           lon: position.coords.longitude,
           name: "ตำแหน่งของฉัน",
-        };
-        setLoc(next);
-        mapRef.current?.setView([next.lat, next.lon], 9);
-        load(next.lat, next.lon);
+        });
       },
-      () => setNotes(["อ่านตำแหน่งของเครื่องไม่ได้"])
+      () => note("locate", "อ่านตำแหน่งของเครื่องไม่ได้")
     );
   }
 
@@ -650,11 +814,32 @@ function App() {
     load();
   }
 
-  const summary = useMemo(() => summarise(station, forecast), [station, forecast]);
+  useEffect(() => {
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("/sw.js").catch(() => {});
+    }
+  }, []);
+
+  const summary = useMemo(
+    () => summarise(station, forecast, drift),
+    [station, forecast, drift]
+  );
+
   const spread = forecast?.series?.length
     ? Math.max(...forecast.series.map((step) => step.spread))
     : 0;
   const trust = confidence(spread);
+
+  const busy = radarBusy || groundBusy;
+  const stationFar = station && station.km > STATION_NEAR_KM;
+  const stationAge = ageLabel(station?.at, now);
+  const stationStale = station && isStale(station.at, STATION_STALE_MINUTES, now);
+
+  const radarAt = frames.length ? new Date(frames.at(-1).time * 1000) : null;
+  const radarMinutes = ageMinutes(radarAt, now);
+  const radarStale = radarAt && isStale(radarAt, RADAR_STALE_MINUTES, now);
+
+  const problems = Object.values(notes);
 
   return (
     <div className="app">
@@ -667,26 +852,46 @@ function App() {
           <button onClick={locate} aria-label="ใช้ตำแหน่งของฉัน">
             📍
           </button>
-          <button onClick={refresh} aria-label="อัปเดตข้อมูล">
+          <button
+            onClick={refresh}
+            disabled={busy}
+            aria-label="อัปเดตข้อมูล"
+            aria-busy={busy}
+          >
             ↻
           </button>
         </div>
       </header>
 
       <section className={`answer ${summary.now.key}`}>
-        {loading && !station ? (
+        {busy && !station && !drift?.ok ? (
           <div className="verdict">กำลังโหลด…</div>
         ) : (
           <>
             <div className="verdict">{summary.now.label}</div>
 
+            {basisLine(summary.basis, station) && (
+              <div className="basis">{basisLine(summary.basis, station)}</div>
+            )}
+
             {station ? (
               <div className="measured">
+                {stationFar ? "สถานีใกล้สุด " : ""}
                 {station.name}
                 {station.amphoe ? ` อ.${station.amphoe}` : ""} ห่าง{" "}
                 {station.km.toFixed(0)} กม. วัดได้{" "}
                 <b>{station.mmPerHour.toFixed(1)} มม./ชม.</b>
                 {station.at ? ` เมื่อ ${clock(station.at)}` : ""}
+                {stationAge ? ` (${stationAge})` : ""}
+                {stationFar ? (
+                  <span className="warning">
+                    {" "}
+                    · ไกลเกิน {STATION_NEAR_KM} กม. จึงใช้แทนจุดนี้ไม่ได้
+                  </span>
+                ) : null}
+                {stationStale ? (
+                  <span className="warning"> · ยังไม่มีค่าใหม่เกิน 1 ชม.</span>
+                ) : null}
               </div>
             ) : (
               <div className="measured">ไม่มีสถานีวัดน้ำฝนใกล้เคียง</div>
@@ -698,7 +903,7 @@ function App() {
               the sharper answer for the next hour; the model line covers the
               rest of the window, where nothing has formed yet.
             */}
-            {drift && (
+            {drift?.ok && (
               <div className="outlook">
                 {drift.change
                   ? `อีก ${drift.change.minutes} นาที ${drift.change.klass.label}`
@@ -710,14 +915,14 @@ function App() {
             )}
 
             {summary.outlook && (
-              <div className={drift ? "secondary" : "outlook"}>
+              <div className={drift?.ok ? "secondary" : "outlook"}>
                 {summary.outlook}
-                {drift && <span className="from">จากโมเดลพยากรณ์</span>}
+                {drift?.ok && <span className="from">จากโมเดลพยากรณ์</span>}
               </div>
             )}
 
             <div className="chips">
-              {drift?.moving && (
+              {drift?.ok && drift.moving && (
                 <span className="chip">
                   <span
                     className="arrow"
@@ -735,6 +940,15 @@ function App() {
                   โมเดลเห็นตรงกัน: {trust.label}
                 </span>
               )}
+
+              {radarMinutes !== null && (
+                <span className={`chip ${radarStale ? "warning" : ""}`}>
+                  ภาพเรดาร์{" "}
+                  {radarMinutes < 1 ? "ล่าสุด" : `เก่า ${radarMinutes} นาที`}
+                </span>
+              )}
+
+              {busy && <span className="chip">กำลังอัปเดต…</span>}
             </div>
           </>
         )}
@@ -771,12 +985,14 @@ function App() {
               : idx >= 0 && frames[idx]
                 ? `เรดาร์ ${clock(frames[idx].time * 1000)}`
                 : "ไม่มีภาพเรดาร์"}
+            <span className="from">แตะแผนที่เพื่อเลือกจุดใหม่</span>
           </div>
         </div>
 
         {source === "rainviewer" ? (
           <div className="player">
             <input
+              aria-label="เลือกเวลาภาพเรดาร์ย้อนหลัง"
               type="range"
               min="0"
               max={Math.max(0, frames.length - 1)}
@@ -801,10 +1017,10 @@ function App() {
         )}
       </section>
 
-      {notes.length > 0 && (
+      {problems.length > 0 && (
         <section className="problems">
-          {notes.map((note) => (
-            <div key={note}>{note}</div>
+          {problems.map((problem) => (
+            <div key={problem}>{problem}</div>
           ))}
         </section>
       )}

@@ -21,7 +21,14 @@ const DEFAULT_LIMIT = 8;
 const MAX_LIMIT = 50;
 const MAX_RADIUS_KM = 300;
 
-function distanceKm(aLat, aLon, bLat, bLon) {
+/*
+ * The upstream is a 4 MB document from a service with no availability promise.
+ * Without a deadline a slow read holds an edge invocation open until the
+ * platform kills it, and the caller waits the whole time for nothing.
+ */
+const UPSTREAM_TIMEOUT_MS = 15_000;
+
+export function distanceKm(aLat, aLon, bLat, bLon) {
   const toRad = (deg) => (deg * Math.PI) / 180;
   const dLat = toRad(bLat - aLat);
   const dLon = toRad(bLon - aLon);
@@ -31,7 +38,7 @@ function distanceKm(aLat, aLon, bLat, bLon) {
   return 2 * 6371 * Math.asin(Math.sqrt(h));
 }
 
-function trim(row, km) {
+export function trim(row, km) {
   return {
     id: row.station?.id,
     name: row.station?.tele_station_name?.th ?? "",
@@ -52,18 +59,41 @@ function json(body, status = 200) {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
-      "cache-control": `public, max-age=${EDGE_TTL}`,
+      // Only a real answer is worth caching. Pinning a 502 to the edge for two
+      // minutes would keep serving the failure after the upstream recovered.
+      "cache-control":
+        status === 200
+          ? `public, max-age=${EDGE_TTL}, s-maxage=${EDGE_TTL}, stale-while-revalidate=300`
+          : "no-store",
     },
   });
 }
 
 export async function onRequestGet({ request }) {
   const url = new URL(request.url);
-  const lat = Number(url.searchParams.get("lat"));
-  const lon = Number(url.searchParams.get("lon"));
 
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-    return json({ error: "lat and lon are required" }, 400);
+  /*
+   * The parameters are read as text first. `Number(null)` and `Number("")` are
+   * both 0, which is a real coordinate in the Gulf of Guinea, so a caller that
+   * forgot the parameters altogether used to get a confident answer for a point
+   * in the Atlantic instead of being told it had asked wrong.
+   */
+  const latText = url.searchParams.get("lat");
+  const lonText = url.searchParams.get("lon");
+  const lat = Number(latText);
+  const lon = Number(lonText);
+
+  const missing = !latText?.trim() || !lonText?.trim();
+  const outOfRange =
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lon) ||
+    lat < -90 ||
+    lat > 90 ||
+    lon < -180 ||
+    lon > 180;
+
+  if (missing || outOfRange) {
+    return json({ error: "lat and lon must be valid coordinates" }, 400);
   }
 
   const limit = Math.min(
@@ -76,9 +106,10 @@ export async function onRequestGet({ request }) {
     upstream = await fetch(UPSTREAM, {
       cf: { cacheTtl: UPSTREAM_TTL, cacheEverything: true },
       headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
     });
   } catch {
-    return json({ error: "upstream unreachable" }, 502);
+    return json({ error: "upstream unreachable" }, 504);
   }
 
   if (!upstream.ok) return json({ error: "upstream failed" }, 502);

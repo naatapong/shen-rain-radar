@@ -81,6 +81,11 @@ header {
   font-size: 17px;
 }
 
+/* A fetch already in flight, so a second tap would only cancel and restart it. */
+.tools button[disabled] {
+  opacity: 0.45;
+}
+
 /* Answer card ------------------------------------------------------------- */
 
 .answer {
@@ -92,6 +97,10 @@ header {
   border-left: 5px solid var(--dry);
 }
 
+/* The radar palette has one class below the gauge scale's first step. */
+.answer.trace {
+  border-left-color: var(--light);
+}
 .answer.light {
   border-left-color: var(--light);
 }
@@ -109,6 +118,14 @@ header {
   font-size: 26px;
   font-weight: 800;
   letter-spacing: 0.2px;
+}
+
+/* Which source the headline rests on, directly under it so the two are read
+   together rather than the number being taken on its own. */
+.basis {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--faint);
 }
 
 .measured {
@@ -187,6 +204,16 @@ header {
   border-radius: 16px;
   background: var(--card);
   border: 1px solid var(--line);
+}
+
+/* A refusal keeps the card's place in the layout but drops the filled border,
+   so it reads as an admission rather than as a reading. */
+.drift.unavailable {
+  border-style: dashed;
+}
+
+.drift.unavailable .scale {
+  color: var(--muted);
 }
 
 .blocks {
@@ -466,6 +493,10 @@ header {
   color: #ff8f8f;
   font-size: 12px;
   line-height: 1.6;
+}
+
+.warning {
+  color: #ffbf69;
 }
 
 .footer {

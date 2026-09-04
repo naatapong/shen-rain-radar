@@ -16,6 +16,11 @@
  *
  * This still assumes rain drifts without growing or decaying, so the result is
  * always labelled as extrapolation rather than forecast.
+ *
+ * Every exit says why. A silent null made the strip vanish with no explanation,
+ * which reads as "no rain coming" when it actually means "cannot tell" — the
+ * opposite of what the caller should hear. The only failure shape now is
+ * `{ ok: false, reason }`.
  */
 
 const TILE = 256;
@@ -41,6 +46,32 @@ const FIRM_MINUTES = 60;
 // Minimum share of the canvas that must hold echo before a motion estimate is
 // trusted. Below this the search is matching noise.
 const MIN_ECHO_CELLS = 40;
+export const MAX_SPEED_KMH = 120;
+export const MAX_SCATTER_KMH = 45;
+
+/*
+ * Two pairs can agree on speed and still disagree on where the rain is going —
+ * an echo growing on its upwind flank looks like drift the other way. Speed
+ * scatter does not catch that, so the bearings are checked on their own: a pair
+ * further than this off the consensus means the field is changing shape rather
+ * than drifting, and there is no honest vector to project forward.
+ */
+export const MAX_DIRECTION_SPREAD = 45;
+
+// Under one coarse cell of displacement a pair has no meaningful bearing, so it
+// is left out of the direction vote instead of dragging it around.
+const MIN_VECTOR_CELLS = 1;
+
+export const REASONS = {
+  frames: "ยังไม่มีภาพเรดาร์ย้อนหลังพอจะจับการเคลื่อนตัว",
+  echo: "ฝนแถวนี้น้อยหรือกระจัดกระจายเกินกว่าจะจับทิศทางได้",
+  speed: "ความเร็วที่จับได้สูงเกินจริง",
+  scatter: "การเคลื่อนตัวไม่คงที่พอจะยืดออกไปข้างหน้า",
+  direction: "แต่ละช่วงเวลาให้ทิศทางไม่ตรงกัน",
+  offCanvas: "กลุ่มฝนเคลื่อนออกนอกกรอบภาพที่ดึงมาได้",
+};
+
+const unable = (reason) => ({ ok: false, reason });
 
 /*
  * The public tiles come back in one fixed palette — the colour-scheme segment in
@@ -49,7 +80,7 @@ const MIN_ECHO_CELLS = 40;
  * blue is light, yellow is moderate, orange and red are heavy. No attempt is
  * made to turn a colour back into millimetres, which the palette cannot support.
  */
-const CLASSES = [
+export const CLASSES = [
   { key: "dry", label: "ไม่มีฝน" },
   { key: "trace", label: "ฝนประปราย" },
   { key: "light", label: "ฝนเบา" },
@@ -58,7 +89,7 @@ const CLASSES = [
   { key: "violent", label: "ฝนหนักมาก" },
 ];
 
-function intensity(r, g, b, a) {
+export function intensity(r, g, b, a) {
   if (a < 20) return 0;
 
   // Semi-transparent sand tones sit below the first real reflectivity step.
@@ -72,7 +103,7 @@ function intensity(r, g, b, a) {
   return 1;
 }
 
-function tileIndex(lat, lon, zoom) {
+export function tileIndex(lat, lon, zoom) {
   const n = 2 ** zoom;
   const x = ((lon + 180) / 360) * n;
   const latRad = (lat * Math.PI) / 180;
@@ -80,7 +111,7 @@ function tileIndex(lat, lon, zoom) {
   return { x, y };
 }
 
-function metresPerPixel(lat, zoom) {
+export function metresPerPixel(lat, zoom) {
   return (156543.03392 * Math.cos((lat * Math.PI) / 180)) / 2 ** zoom;
 }
 
@@ -145,16 +176,24 @@ async function readFrame(host, path, originX, originY) {
  * where both frames are empty are skipped so the score cannot be won by lining
  * up empty sky.
  */
-function findMotion(previous, current, size) {
+export function findMotion(previous, current, size, focus) {
   let best = null;
+  // Estimate the storm that can reach this point, rather than averaging a
+  // distant line of storms with the air above the user. This also halves the
+  // work on a phone compared with scanning the entire 3x3 block.
+  const radius = Math.min(48, Math.floor(size / 3));
+  const minX = Math.max(SEARCH, Math.floor(focus.x - radius));
+  const maxX = Math.min(size - SEARCH, Math.ceil(focus.x + radius));
+  const minY = Math.max(SEARCH, Math.floor(focus.y - radius));
+  const maxY = Math.min(size - SEARCH, Math.ceil(focus.y + radius));
 
   for (let dy = -SEARCH; dy <= SEARCH; dy += 1) {
     for (let dx = -SEARCH; dx <= SEARCH; dx += 1) {
       let error = 0;
       let counted = 0;
 
-      for (let y = SEARCH; y < size - SEARCH; y += 1) {
-        for (let x = SEARCH; x < size - SEARCH; x += 1) {
+      for (let y = minY; y < maxY; y += 1) {
+        for (let x = minX; x < maxX; x += 1) {
           const now = current[y * size + x];
           const then = previous[(y - dy) * size + (x - dx)];
           if (now === 0 && then === 0) continue;
@@ -174,7 +213,7 @@ function findMotion(previous, current, size) {
   return best;
 }
 
-function bearing(dx, dy) {
+export function bearing(dx, dy) {
   // Screen y grows southward, so flip it before reading a compass angle.
   const degrees = (Math.atan2(dx, -dy) * 180) / Math.PI;
   const compass = (degrees + 360) % 360;
@@ -191,15 +230,77 @@ function bearing(dx, dy) {
   return { degrees: compass, name: names[Math.round(compass / 45) % 8] };
 }
 
+/*
+ * Reduces the per-pair vectors to one drift plus two measures of disagreement:
+ * how far the pairs sit from the average, and how far the worst of them sits
+ * from the consensus bearing.
+ */
+export function vectorStats(vectors) {
+  const n = vectors.length;
+  const dx = vectors.reduce((sum, v) => sum + v.dx, 0) / n;
+  const dy = vectors.reduce((sum, v) => sum + v.dy, 0) / n;
+
+  const scatterCells = Math.max(
+    ...vectors.map((v) => Math.hypot(v.dx - dx, v.dy - dy))
+  );
+
+  const moving = vectors.filter(
+    (v) => Math.hypot(v.dx, v.dy) >= MIN_VECTOR_CELLS
+  );
+  const meanAngle = Math.atan2(dx, -dy);
+
+  // With a near-stationary consensus there is no bearing to disagree with, and
+  // the magnitude gate is the one doing the work.
+  const spreadDegrees =
+    Math.hypot(dx, dy) < MIN_VECTOR_CELLS || moving.length < 2
+      ? 0
+      : Math.max(
+          ...moving.map((v) => {
+            const diff = Math.atan2(v.dx, -v.dy) - meanAngle;
+            // Wrap into +/-180 so two bearings either side of north compare
+            // close rather than 350 degrees apart.
+            return (
+              (Math.abs(Math.atan2(Math.sin(diff), Math.cos(diff))) * 180) /
+              Math.PI
+            );
+          })
+        );
+
+  return { dx, dy, scatterCells, spreadDegrees };
+}
+
+/*
+ * The quality gate. Every case it names is one where a plausible-looking storm
+ * path would be invented rather than measured, so the caller is told the drift
+ * cannot be estimated instead of being handed the invention.
+ */
+export function motionVerdict({ speedKmh, scatterKmh, spreadDegrees, pairs }) {
+  if (!pairs) return REASONS.echo;
+  if (speedKmh > MAX_SPEED_KMH) return REASONS.speed;
+  if (scatterKmh > MAX_SCATTER_KMH) return REASONS.scatter;
+  if (spreadDegrees > MAX_DIRECTION_SPREAD) return REASONS.direction;
+  return null;
+}
+
+export function trustFor({ scatterKmh, pairs, spreadDegrees }) {
+  if (pairs < 2 || scatterKmh > 25 || spreadDegrees > 30) {
+    return { key: "low", label: "ต่ำ" };
+  }
+  if (scatterKmh > 12 || spreadDegrees > 15) {
+    return { key: "medium", label: "ปานกลาง" };
+  }
+  return { key: "high", label: "สูง" };
+}
+
 /**
  * Works out what the radar says is heading for a point.
  *
  * @param frames RainViewer's `radar.past` list, oldest first
  * @param host   the tile host from the same document
- * @returns null when there is not enough echo to say anything
+ * @returns `{ ok: true, ... }` or `{ ok: false, reason }` — never null
  */
 export async function nowcast({ frames, host, lat, lon }) {
-  if (!Array.isArray(frames) || frames.length < 2) return null;
+  if (!Array.isArray(frames) || frames.length < 2) return unable(REASONS.frames);
 
   // As many consecutive pairs as the history allows, up to the cap.
   const wanted = Math.min(MOTION_PAIRS + 1, frames.length);
@@ -221,24 +322,25 @@ export async function nowcast({ frames, host, lat, lon }) {
   const currentFrame = window[window.length - 1];
 
   const vectors = [];
+  const focus = { x: px / COARSE, y: py / COARSE };
   for (let i = 1; i < painted.length; i += 1) {
     const found = findMotion(
       painted[i - 1].coarse,
       painted[i].coarse,
-      current.size
+      current.size,
+      focus
     );
     if (found) vectors.push(found);
   }
 
-  if (!vectors.length) return null;
+  if (!vectors.length) return unable(REASONS.echo);
 
   /*
    * Average the pairs rather than trusting the newest one. Over a two-hour
    * horizon a single coarse cell of search error becomes 48 pixels — about 55 km
    * — so the steadier vector is worth more than the freshest one.
    */
-  const dx = vectors.reduce((sum, v) => sum + v.dx, 0) / vectors.length;
-  const dy = vectors.reduce((sum, v) => sum + v.dy, 0) / vectors.length;
+  const { dx, dy, scatterCells, spreadDegrees } = vectorStats(vectors);
 
   // Coarse cells back to full-resolution pixels, then to pixels per minute.
   const perMinuteX = (dx * COARSE) / FRAME_GAP_MINUTES;
@@ -246,6 +348,7 @@ export async function nowcast({ frames, host, lat, lon }) {
 
   const metres = metresPerPixel(lat, ZOOM);
   const toKmh = (pixelsPerMinute) => (pixelsPerMinute * metres * 60) / 1000;
+
   const speedKmh = toKmh(Math.hypot(perMinuteX, perMinuteY));
 
   /*
@@ -254,20 +357,17 @@ export async function nowcast({ frames, host, lat, lon }) {
    * being projected forward, pairs that scatter mean the field is changing shape
    * and the far end of the strip is guesswork.
    */
-  const scatterKmh = vectors.length
-    ? Math.max(
-        ...vectors.map((v) =>
-          toKmh(Math.hypot(v.dx - dx, v.dy - dy) * COARSE / FRAME_GAP_MINUTES)
-        )
-      )
-    : Infinity;
+  const scatterKmh = toKmh((scatterCells * COARSE) / FRAME_GAP_MINUTES);
 
-  const trust =
-    vectors.length < 2 || scatterKmh > 25
-      ? { key: "low", label: "ต่ำ" }
-      : scatterKmh > 12
-        ? { key: "medium", label: "ปานกลาง" }
-        : { key: "high", label: "สูง" };
+  const refused = motionVerdict({
+    speedKmh,
+    scatterKmh,
+    spreadDegrees,
+    pairs: vectors.length,
+  });
+  if (refused) return unable(refused);
+
+  const trust = trustFor({ scatterKmh, pairs: vectors.length, spreadDegrees });
 
   const sample = (x, y) => {
     const ix = Math.round(x);
@@ -293,9 +393,14 @@ export async function nowcast({ frames, host, lat, lon }) {
     });
   }
 
+  // Not one usable step means the drift leaves the block within ten minutes,
+  // which is a refusal rather than an answer with a short horizon.
+  if (!steps.length) return unable(REASONS.offCanvas);
+
   const change = steps.find((step) => step.value !== nowValue);
 
   return {
+    ok: true,
     at: currentFrame.time * 1000,
     now: CLASSES[nowValue],
     steps,
@@ -305,10 +410,11 @@ export async function nowcast({ frames, host, lat, lon }) {
     moving: speedKmh >= 5,
     speedKmh,
     direction: bearing(dx, dy),
-    horizonMinutes: steps.length ? steps[steps.length - 1].minutes : 0,
+    horizonMinutes: steps[steps.length - 1].minutes,
     firmMinutes: FIRM_MINUTES,
     trust,
     scatterKmh,
+    spreadDegrees,
     pairs: vectors.length,
   };
 }

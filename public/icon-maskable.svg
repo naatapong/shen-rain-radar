@@ -1,0 +1,7 @@
+<!--
+  Maskable variant. Android crops an installed icon to whatever shape the
+  launcher uses, so the background bleeds to the edge with no rounded corners of
+  its own and the artwork is held inside the 80% safe circle. The plain icon.svg
+  would lose its raindrops to that crop.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" fill="#0b1220"/><g transform="translate(97 97) scale(0.62)"><path d="M152 302c-37 0-67-29-67-66 0-34 25-62 58-66 18-51 67-86 123-86 67 0 123 50 132 115 25 5 44 27 44 54 0 31-25 56-56 56H152z" fill="#4bb3f5"/><path d="M205 337l-18 51M266 337l-18 51M327 337l-18 51" stroke="#ffd166" stroke-width="22" stroke-linecap="round"/></g></svg>

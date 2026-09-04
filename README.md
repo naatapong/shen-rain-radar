@@ -43,6 +43,16 @@ The strip stops early if the drift would carry the answer off the painted block,
 which is what the horizon note means when it appears — better than reporting
 tiles that were never fetched as clear sky.
 
+Before any of that is shown it has to clear a quality gate, and a refusal is a
+first-class result: `nowcast()` returns `{ ok: false, reason }` rather than
+nothing, and the strip prints the reason. A silent absence read as "no rain
+coming" when it actually meant "cannot tell", which is the wrong way round for
+the one thing this app exists to answer. The gate refuses when there is too
+little echo to match, when the pairs disagree on speed, when the search is
+pinned against its speed cap, and when the pairs disagree on *bearing* —
+scatter alone misses that last one, because two equal vectors ninety degrees
+apart average to a perfectly plausible drift that neither frame observed.
+
 Intensity is read off the tile palette's colour families — blue light, yellow
 moderate, red heavy — because the free tile service ignores the colour-scheme
 segment of the tile path and serves one fixed palette. No attempt is made to turn
@@ -70,6 +80,53 @@ belongs.
 
 Beyond the first hour the outlook is a short-range model consensus, not radar.
 Model disagreement is shown as spread rather than hidden.
+
+Every outside call has a timeout and one retry, and the retry only fires for the
+transport failing or the server admitting it broke — a 4xx is an answer and will
+not change on a second ask. A source that goes down leaves its last values on
+screen with a note saying so, rather than blanking the card.
+
+## Freshness
+
+Nothing on screen is undated. The gauge reading carries its own age, the radar
+frame carries its own age, and both say when they have gone past the point where
+they should still be read as current — twenty minutes for radar, an hour for a
+gauge that reports hourly.
+
+Each source refreshes on its own clock, because they publish on different ones:
+radar every 5 minutes, gauges and models every 12. The timer checks what is
+actually due rather than reloading everything, which is also what happens on
+returning to the tab — a tab left open for an hour catches up on both, and a tab
+switched away for thirty seconds does nothing.
+
+## The headline's source
+
+The gauge wins the headline while it is within 15 km, because it is a
+measurement. Past that the radar pixel overhead takes over and the gauge drops
+to a supporting line: convective rain here is routinely narrower than the
+distance to the nearest telemetry station, and a reading from 40 km away
+presented as the headline reads as "the rain here" when it is not. Whichever
+source is carrying the answer is named directly under it.
+
+## Install
+
+`public/sw.js` caches the app shell so the app opens instantly and still opens
+with no signal. It does not cache data: every number on screen comes from a live
+source, and a cached rain reading is worse than no reading. The shell is fetched
+network-first — cache-first saves a few milliseconds and pins an installed app
+to whichever build was current when the service worker installed, which is how a
+PWA ends up serving a version nobody can update out of.
+
+## Test
+
+```bash
+npm test
+```
+
+Pure logic only, no browser: timezone handling, data ages, model consensus
+alignment, the rain-class boundaries, the motion search and its confidence
+grading, the quality gate's refusals, which source the headline picks, and the
+edge function's validation and upstream failure modes.
 
 ## Run
 
@@ -106,8 +163,13 @@ output directory `dist`. `functions/` is picked up automatically.
    line of storms and the air behind it are not averaged together. This matters
    most at the far end of the two hours.
 3. Calibrate the outlook against the station readings it can already see.
-4. Rain alerts. This needs a service worker and push, which the app does not
-   have yet.
+4. Pick a location by searching for a place, and keep a few saved ones — home,
+   the shop, a delivery route. Tapping the map is the only way in at the moment.
+
+Deliberately not here: rain alerts. They need a push subscription, a stored
+location and a server-side sender, which is a lot of standing machinery for a
+notification that this app's own confidence gate would suppress most of the
+time. Opening the app answers the question.
 
 ## Sources
 
