@@ -1,25 +1,50 @@
-# Shen Rain Radar v2
+# SHEN RAIN RADAR
 
-## Data strategy
+Mobile-first rain radar web app for Thailand.
 
-1. **RainViewer** — observed radar history for the last ~2 hours, 10-minute intervals. RainViewer discontinued its public future radar nowcast on 2026-01-01, so the app does not label RainViewer as a future nowcast.
-2. **Thai Meteorological Department (TMD)** — official Thai radar network. TMD lists radar stations including Mae Hong Son, Chiang Rai, Lamphun and Doi Muser, plus nationwide composite products. A dedicated TMD adapter is kept separate because TMD's public presentation is image/composite based and should not be guessed into a tile URL.
-3. **Open-Meteo multi-model** — ECMWF IFS, NOAA GFS and DWD ICON are requested separately and combined with a median for the short-range precipitation signal. Model disagreement is shown as spread rather than hidden.
+## Current architecture
 
-## Why this design
+- RainViewer: observed radar history / animation.
+- TMD: Thailand radar composite image overlay.
+- Open-Meteo: ECMWF + NOAA GFS + DWD ICON model comparison.
+- Consensus: median precipitation + model spread.
+- Location: browser geolocation.
+- No ads.
 
-For the first release, observed radar should remain the primary signal. The next 2 hours are treated as a **short-range precipitation outlook**, not as guaranteed radar nowcast. The architecture leaves room for a future TMD nowcast adapter where official coverage exists.
+## Important data semantics
 
-## Local
+RainViewer public weather maps are used for historical radar frames. The app does **not**
+pretend that RainViewer public data is a future radar nowcast.
+
+The 0–2 hour panel is currently a short-range model consensus, not a radar-derived
+nowcast. A later version can add radar-motion extrapolation from sequential TMD/RainViewer
+frames.
+
+## Run
+
+```bash
 npm install
 npm run dev
+```
 
 ## Build
+
+```bash
 npm run build
+npm run preview
+```
+
+## Next planned upgrade
+
+1. TMD station-level radar sequence ingestion where a stable public endpoint is available.
+2. Radar motion estimation / extrapolation for 0–120 minutes.
+3. Blend radar extrapolation with NWP consensus.
+4. Calibration against recent observed radar/QPE.
+5. Cloudflare deployment after the source is stable.
 
 ## Sources
-RainViewer: https://www.rainviewer.com/api/transition-faq.html
-TMD radar: https://weather.tmd.go.th/
-TMD satellite/radar analysis: https://satda.tmd.go.th/
-Open-Meteo docs: https://open-meteo.com/en/docs
-ECMWF API: https://open-meteo.com/en/docs/ecmwf-api
+
+- RainViewer public weather maps API
+- Thai Meteorological Department radar / SATDA public products
+- Open-Meteo forecast APIs
+- OpenStreetMap basemap
