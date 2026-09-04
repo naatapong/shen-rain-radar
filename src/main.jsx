@@ -351,6 +351,56 @@ function summarise(station, forecast) {
   };
 }
 
+/*
+ * The two-hour extrapolation as one block per ten minutes. Everything past the
+ * firm mark is drawn hollow: persistence has had long enough by then that cells
+ * forming and dying matter as much as the drift, and the strip should look less
+ * certain there rather than merely say so in small print.
+ */
+function DriftStrip({ drift }) {
+  if (!drift?.steps?.length) return null;
+
+  const marks = [30, 60, 90, 120];
+
+  return (
+    <section className="drift">
+      <div className="axis">
+        <span className="measured">เรดาร์ · ทิศทางกลุ่มฝนที่วัดได้</span>
+        <span className="forecast">
+          แม่นยำ: {drift.trust.label}
+          {drift.pairs > 1 ? ` · จาก ${drift.pairs} ช่วงเวลา` : ""}
+        </span>
+      </div>
+
+      <div className="blocks">
+        {drift.steps.map((step) => (
+          <div
+            className={`block ${step.klass.key} ${step.firm ? "firm" : "soft"}`}
+            key={step.minutes}
+            title={`อีก ${step.minutes} นาที · ${step.klass.label}`}
+          />
+        ))}
+      </div>
+
+      <div className="marks">
+        {marks
+          .filter((minutes) => minutes <= drift.horizonMinutes)
+          .map((minutes) => (
+            <span key={minutes} style={{ left: `${(minutes / 120) * 100}%` }}>
+              {minutes} น.
+            </span>
+          ))}
+      </div>
+
+      {drift.horizonMinutes < 120 && (
+        <div className="scale">
+          บอกได้ถึง {drift.horizonMinutes} นาที — กลุ่มฝนเคลื่อนเร็วจนพ้นขอบภาพที่ดึงมา
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Timeline({ station, forecast }) {
   const past = useMemo(() => {
     if (!station?.history?.length) return [];
@@ -689,6 +739,8 @@ function App() {
           </>
         )}
       </section>
+
+      <DriftStrip drift={drift} />
 
       <Timeline station={station} forecast={forecast} />
 

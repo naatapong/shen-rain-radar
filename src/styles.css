@@ -179,6 +179,80 @@ header {
   color: #ff8f8f;
 }
 
+/* Radar extrapolation strip ------------------------------------------------ */
+
+.drift {
+  margin: 0 10px;
+  padding: 14px 12px 12px;
+  border-radius: 16px;
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+
+.blocks {
+  display: flex;
+  gap: 3px;
+  height: 26px;
+}
+
+.block {
+  flex: 1;
+  border-radius: 5px;
+  background: #17243a;
+  border: 1px solid transparent;
+}
+
+.block.firm.trace {
+  background: #2f4f74;
+}
+.block.firm.light {
+  background: var(--light);
+}
+.block.firm.moderate {
+  background: var(--moderate);
+}
+.block.firm.heavy {
+  background: var(--heavy);
+}
+.block.firm.violent {
+  background: var(--violent);
+}
+
+/* Past the firm mark the same classes are outlined rather than filled. */
+.block.soft {
+  background: transparent;
+  border-color: #2b3b55;
+}
+.block.soft.trace {
+  border-color: #2f4f74;
+}
+.block.soft.light {
+  border-color: var(--light);
+}
+.block.soft.moderate {
+  border-color: var(--moderate);
+}
+.block.soft.heavy {
+  border-color: var(--heavy);
+}
+.block.soft.violent {
+  border-color: var(--violent);
+}
+
+.marks {
+  position: relative;
+  height: 14px;
+  margin-top: 6px;
+}
+
+.marks span {
+  position: absolute;
+  transform: translateX(-100%);
+  font-size: 9px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
 /* Timeline ---------------------------------------------------------------- */
 
 .timeline {

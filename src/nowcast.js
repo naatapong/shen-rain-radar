@@ -3,13 +3,19 @@
  *
  * RainViewer withdrew its public future-radar product at the start of 2026, but
  * the observed frames are still open and served with permissive CORS, so the
- * short-range answer can be worked out here instead: line up the two most recent
- * frames, find the single translation that best explains how the echo moved, and
- * carry the current frame along that vector. What is over you in twenty minutes
- * is whatever is twenty minutes upwind of you now.
+ * short-range answer can be worked out here instead: line up the recent frames,
+ * find the single translation that best explains how the echo moved, and carry
+ * the current frame along that vector. What is over you in twenty minutes is
+ * whatever is twenty minutes upwind of you now.
  *
- * This assumes rain drifts without growing or decaying, which is why the result
- * is only offered for the first hour and is always labelled as extrapolation.
+ * The horizon is two hours, which means the ten-minute displacement gets
+ * multiplied by twelve — and so does any error in it. A vector taken from a
+ * single pair of frames is not steady enough to survive that, so the estimate is
+ * averaged over several consecutive pairs and how far those pairs disagree
+ * becomes the confidence reported alongside the answer.
+ *
+ * This still assumes rain drifts without growing or decaying, so the result is
+ * always labelled as extrapolation rather than forecast.
  */
 
 const TILE = 256;
@@ -18,11 +24,19 @@ const GRID = 3; // 3x3 tiles keeps the upwind area on the canvas
 const CANVAS = TILE * GRID;
 
 const COARSE = 4; // motion search runs on a 4x downsampled copy
-const SEARCH = 6; // +/- 6 coarse cells is about 110 km/h at this zoom
+const SEARCH = 6; // +/- 6 coarse cells is about 165 km/h at this zoom
 const FRAME_GAP_MINUTES = 10;
 
-const HORIZON_MINUTES = 60;
+// Pairs of frames averaged into the motion estimate. Three pairs spans the last
+// forty minutes and costs four frames of tiles.
+const MOTION_PAIRS = 3;
+
+const HORIZON_MINUTES = 120;
 const STEP_MINUTES = 10;
+
+// Past this point persistence has had long enough to be overtaken by cells
+// forming and dying, so the strip says so rather than pretending otherwise.
+const FIRM_MINUTES = 60;
 
 // Minimum share of the canvas that must hold echo before a motion estimate is
 // trusted. Below this the search is matching noise.
@@ -187,8 +201,9 @@ function bearing(dx, dy) {
 export async function nowcast({ frames, host, lat, lon }) {
   if (!Array.isArray(frames) || frames.length < 2) return null;
 
-  const previousFrame = frames[frames.length - 2];
-  const currentFrame = frames[frames.length - 1];
+  // As many consecutive pairs as the history allows, up to the cap.
+  const wanted = Math.min(MOTION_PAIRS + 1, frames.length);
+  const window = frames.slice(-wanted);
 
   const centre = tileIndex(lat, lon, ZOOM);
   const originX = Math.floor(centre.x) - 1;
@@ -198,21 +213,61 @@ export async function nowcast({ frames, host, lat, lon }) {
   const px = (centre.x - originX) * TILE;
   const py = (centre.y - originY) * TILE;
 
-  const [previous, current] = await Promise.all([
-    readFrame(host, previousFrame.path, originX, originY),
-    readFrame(host, currentFrame.path, originX, originY),
-  ]);
+  const painted = await Promise.all(
+    window.map((frame) => readFrame(host, frame.path, originX, originY))
+  );
 
-  const motion = findMotion(previous.coarse, current.coarse, current.size);
-  if (!motion) return null;
+  const current = painted[painted.length - 1];
+  const currentFrame = window[window.length - 1];
+
+  const vectors = [];
+  for (let i = 1; i < painted.length; i += 1) {
+    const found = findMotion(
+      painted[i - 1].coarse,
+      painted[i].coarse,
+      current.size
+    );
+    if (found) vectors.push(found);
+  }
+
+  if (!vectors.length) return null;
+
+  /*
+   * Average the pairs rather than trusting the newest one. Over a two-hour
+   * horizon a single coarse cell of search error becomes 48 pixels — about 55 km
+   * — so the steadier vector is worth more than the freshest one.
+   */
+  const dx = vectors.reduce((sum, v) => sum + v.dx, 0) / vectors.length;
+  const dy = vectors.reduce((sum, v) => sum + v.dy, 0) / vectors.length;
 
   // Coarse cells back to full-resolution pixels, then to pixels per minute.
-  const perMinuteX = (motion.dx * COARSE) / FRAME_GAP_MINUTES;
-  const perMinuteY = (motion.dy * COARSE) / FRAME_GAP_MINUTES;
+  const perMinuteX = (dx * COARSE) / FRAME_GAP_MINUTES;
+  const perMinuteY = (dy * COARSE) / FRAME_GAP_MINUTES;
 
   const metres = metresPerPixel(lat, ZOOM);
-  const speedKmh =
-    (Math.hypot(perMinuteX, perMinuteY) * metres * 60) / 1000;
+  const toKmh = (pixelsPerMinute) => (pixelsPerMinute * metres * 60) / 1000;
+  const speedKmh = toKmh(Math.hypot(perMinuteX, perMinuteY));
+
+  /*
+   * How far the individual pairs sit from that average, in km/h. This is the
+   * honest confidence signal: pairs that agree mean a steady drift that survives
+   * being projected forward, pairs that scatter mean the field is changing shape
+   * and the far end of the strip is guesswork.
+   */
+  const scatterKmh = vectors.length
+    ? Math.max(
+        ...vectors.map((v) =>
+          toKmh(Math.hypot(v.dx - dx, v.dy - dy) * COARSE / FRAME_GAP_MINUTES)
+        )
+      )
+    : Infinity;
+
+  const trust =
+    vectors.length < 2 || scatterKmh > 25
+      ? { key: "low", label: "ต่ำ" }
+      : scatterKmh > 12
+        ? { key: "medium", label: "ปานกลาง" }
+        : { key: "high", label: "สูง" };
 
   const sample = (x, y) => {
     const ix = Math.round(x);
@@ -227,8 +282,15 @@ export async function nowcast({ frames, host, lat, lon }) {
   for (let t = STEP_MINUTES; t <= HORIZON_MINUTES; t += STEP_MINUTES) {
     // What is upwind now will be overhead at t.
     const value = sample(px - perMinuteX * t, py - perMinuteY * t);
+    // Running off the painted block means the source of that minute was never
+    // fetched, so the strip stops there rather than reporting empty sky as dry.
     if (value === null) break;
-    steps.push({ minutes: t, value, klass: CLASSES[value] });
+    steps.push({
+      minutes: t,
+      value,
+      klass: CLASSES[value],
+      firm: t <= FIRM_MINUTES,
+    });
   }
 
   const change = steps.find((step) => step.value !== nowValue);
@@ -242,7 +304,11 @@ export async function nowcast({ frames, host, lat, lon }) {
     // direction read off it would be noise.
     moving: speedKmh >= 5,
     speedKmh,
-    direction: bearing(motion.dx, motion.dy),
+    direction: bearing(dx, dy),
     horizonMinutes: steps.length ? steps[steps.length - 1].minutes : 0,
+    firmMinutes: FIRM_MINUTES,
+    trust,
+    scatterKmh,
+    pairs: vectors.length,
   };
 }

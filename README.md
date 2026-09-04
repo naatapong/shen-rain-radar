@@ -9,7 +9,7 @@ where I am, and what happens in the next two hours — and shows the map second.
 | --- | --- | --- |
 | Headline reading | Nearest telemetry rain gauge via the National Hydroinformatics Data Center (HII) | measured |
 | Past 6 hours | Hourly rainfall from that same station | measured |
-| Next hour | Radar echo carried along its own measured motion | extrapolated |
+| Next 2 hours, radar | Radar echo carried along its own measured motion | extrapolated |
 | Next 2 hours | Median of ECMWF IFS, NOAA GFS and DWD ICON at 15-minute steps, via Open-Meteo | modelled |
 | Map, animated | RainViewer observed radar, last 2 hours | radar |
 | Map, still | Thai Meteorological Department radar composite | radar |
@@ -22,16 +22,26 @@ on their face which horizon they came from.
 ## The nowcast
 
 RainViewer withdrew its public future-radar product at the start of 2026, so the
-first hour is worked out from the observed frames instead. `src/nowcast.js` lines
-up the two most recent frames over a 3x3 tile block around the point, searches
-for the single translation that best explains how the echo moved, and carries the
-current frame along that vector: what is over you in twenty minutes is whatever
-is twenty minutes upwind of you now.
+two hours are worked out from the observed frames instead. `src/nowcast.js` paints
+the recent frames over a 3x3 tile block around the point, searches for the single
+translation that best explains how the echo moved, and carries the current frame
+along that vector: what is over you in twenty minutes is whatever is twenty
+minutes upwind of you now.
 
-This is Lagrangian persistence. It assumes rain drifts without growing or
-decaying, which is why the answer stops at one hour and is always labelled as
-extrapolation rather than forecast. The same vector gives the storm direction and
-speed shown beside it.
+A two-hour horizon multiplies the ten-minute displacement by twelve, and any
+error in it by the same amount — one coarse cell of search error becomes about
+55 km at the far end. So the vector is averaged over three consecutive pairs of
+frames rather than taken from the newest pair alone, and how far those pairs
+disagree is reported as the confidence beside the strip.
+
+This is Lagrangian persistence: it assumes rain drifts without growing or
+decaying. Past the first hour that assumption is doing most of the work, so the
+strip draws those blocks hollow instead of filled. The same vector gives the
+storm direction and speed shown beside it.
+
+The strip stops early if the drift would carry the answer off the painted block,
+which is what the horizon note means when it appears — better than reporting
+tiles that were never fetched as clear sky.
 
 Intensity is read off the tile palette's colour families — blue light, yellow
 moderate, red heavy — because the free tile service ignores the colour-scheme
@@ -90,10 +100,11 @@ output directory `dist`. `functions/` is picked up automatically.
 
 ## Next
 
-1. Blend the radar extrapolation into the model consensus across the handover
-   at one hour, rather than presenting the two side by side.
+1. Blend the radar extrapolation into the model consensus rather than presenting
+   the two side by side, weighted by how far out the answer is.
 2. Estimate motion per region instead of one vector for the whole block, so a
-   line of storms and the air behind it are not averaged together.
+   line of storms and the air behind it are not averaged together. This matters
+   most at the far end of the two hours.
 3. Calibrate the outlook against the station readings it can already see.
 4. Rain alerts. This needs a service worker and push, which the app does not
    have yet.
