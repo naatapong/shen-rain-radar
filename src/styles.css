@@ -128,10 +128,45 @@ header {
   font-weight: 700;
 }
 
-.trust {
-  margin-top: 10px;
-  font-size: 12px;
+.secondary {
+  margin-top: 7px;
+  font-size: 13px;
   color: var(--muted);
+}
+
+/* Names the horizon a line came from, so the two are never read as one claim. */
+.from {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--faint);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: #17243a;
+  border: 1px solid #2b3b55;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.arrow {
+  display: inline-block;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--ink);
 }
 
 .trust.high {

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+import { nowcast } from "./nowcast";
 import "./styles.css";
 
 const DEFAULT = { lat: 19.917, lon: 99.215, name: "ฝาง, เชียงใหม่" };
@@ -155,7 +156,10 @@ async function getRadarFrames() {
   const response = await fetch(RAINVIEWER_META, { cache: "no-store" });
   if (!response.ok) throw new Error("RainViewer metadata failed");
   const data = await response.json();
-  return data?.radar?.past ?? [];
+  return {
+    host: data?.host ?? RAINVIEWER_TILE,
+    frames: data?.radar?.past ?? [],
+  };
 }
 
 async function getForecast(lat, lon) {
@@ -255,7 +259,29 @@ async function getStationHistory(stationId) {
     .sort((a, b) => a.at - b.at);
 }
 
-async function getNearest(lat, lon) {
+/*
+ * Preferred path: the site's own function has already read the national list at
+ * the edge and hands back only the stations near the caller, a few hundred bytes
+ * instead of the better part of a megabyte. It is absent under `vite dev` and on
+ * any host without functions, so the direct route stays as a fallback.
+ */
+async function getNearestFromEdge(lat, lon) {
+  const response = await fetch(`/api/stations?lat=${lat}&lon=${lon}&limit=1`);
+  if (!response.ok) throw new Error("station function unavailable");
+
+  const type = response.headers.get("content-type") ?? "";
+  if (!type.includes("application/json")) {
+    throw new Error("station function not deployed here");
+  }
+
+  const data = await response.json();
+  const station = data?.stations?.[0];
+  if (!station) throw new Error("no station in range");
+
+  return { ...station, at: parseThaiTime(station.at) };
+}
+
+async function getNearestFromSource(lat, lon) {
   const stations = await getStations();
 
   let nearest = null;
@@ -270,9 +296,16 @@ async function getNearest(lat, lon) {
   }
 
   if (!nearest) throw new Error("no station in range");
+  return { ...nearest, km: best };
+}
+
+async function getNearest(lat, lon) {
+  const nearest = await getNearestFromEdge(lat, lon).catch(() =>
+    getNearestFromSource(lat, lon)
+  );
 
   const history = await getStationHistory(nearest.id).catch(() => []);
-  return { ...nearest, km: best, history };
+  return { ...nearest, history };
 }
 
 /*
@@ -385,6 +418,7 @@ function App() {
   const [forecast, setForecast] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notes, setNotes] = useState([]);
+  const [drift, setDrift] = useState(null);
   const [stamp, setStamp] = useState(() => Date.now());
 
   useEffect(() => {
@@ -421,6 +455,7 @@ function App() {
 
   async function load(lat = loc.lat, lon = loc.lon) {
     setLoading(true);
+    setDrift(null);
     const problems = [];
 
     const [radar, outlook, nearest] = await Promise.allSettled([
@@ -430,8 +465,18 @@ function App() {
     ]);
 
     if (radar.status === "fulfilled") {
-      setFrames(radar.value);
-      setIdx(radar.value.length ? radar.value.length - 1 : -1);
+      const { host, frames: past } = radar.value;
+      setFrames(past);
+      setIdx(past.length ? past.length - 1 : -1);
+
+      /*
+       * The extrapolation reads pixels out of a dozen tiles, so it runs after
+       * the map and the measured reading are already on screen rather than
+       * holding them up.
+       */
+      nowcast({ frames: past, host, lat, lon })
+        .then(setDrift)
+        .catch(() => setDrift(null));
     } else {
       problems.push("โหลดภาพเรดาร์ RainViewer ไม่ได้");
     }
@@ -597,14 +642,50 @@ function App() {
               <div className="measured">ไม่มีสถานีวัดน้ำฝนใกล้เคียง</div>
             )}
 
-            {summary.outlook && <div className="outlook">{summary.outlook}</div>}
-
-            {forecast && (
-              <div className={`trust ${trust.key}`}>
-                โมเดลเห็นตรงกัน: {trust.label} · ต่างกันสูงสุด{" "}
-                {spread.toFixed(1)} มม./ชม.
+            {/*
+              Two horizons, kept apart on purpose. The radar line is the echo
+              that already exists being carried along its own motion, which is
+              the sharper answer for the next hour; the model line covers the
+              rest of the window, where nothing has formed yet.
+            */}
+            {drift && (
+              <div className="outlook">
+                {drift.change
+                  ? `อีก ${drift.change.minutes} นาที ${drift.change.klass.label}`
+                  : drift.now.key === "dry"
+                    ? `อีก ${drift.horizonMinutes} นาทีข้างหน้ายังไม่มีฝน`
+                    : `อีก ${drift.horizonMinutes} นาทีข้างหน้าฝนยังอยู่`}
+                <span className="from">จากการเคลื่อนตัวของกลุ่มฝนบนเรดาร์</span>
               </div>
             )}
+
+            {summary.outlook && (
+              <div className={drift ? "secondary" : "outlook"}>
+                {summary.outlook}
+                {drift && <span className="from">จากโมเดลพยากรณ์</span>}
+              </div>
+            )}
+
+            <div className="chips">
+              {drift?.moving && (
+                <span className="chip">
+                  <span
+                    className="arrow"
+                    style={{ transform: `rotate(${drift.direction.degrees}deg)` }}
+                  >
+                    ↑
+                  </span>
+                  ฝนเคลื่อนไปทาง{drift.direction.name}{" "}
+                  {Math.round(drift.speedKmh)} กม./ชม.
+                </span>
+              )}
+
+              {forecast && (
+                <span className={`chip trust ${trust.key}`}>
+                  โมเดลเห็นตรงกัน: {trust.label}
+                </span>
+              )}
+            </div>
           </>
         )}
       </section>
