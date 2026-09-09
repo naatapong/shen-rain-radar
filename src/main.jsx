@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
@@ -465,6 +465,64 @@ function Timeline({ station, forecast }) {
   );
 }
 
+/*
+ * The browser's own install entry is buried — a menu item on Android, a small
+ * address-bar glyph on desktop — and on iOS it does not exist at all. So the
+ * app carries its own button.
+ *
+ * Chrome hands over a deferred `beforeinstallprompt` event only once it has
+ * accepted the manifest and the service worker, which makes the button's
+ * presence the honest signal: if it is not there, the browser would not have
+ * installed the app either. It fires before React mounts often enough that the
+ * listener is attached in index.html and the event parked on `window`, rather
+ * than being missed and leaving an installable app looking uninstallable.
+ *
+ * Safari never fires it, so iOS gets the manual instruction instead of a button
+ * that could not do anything.
+ */
+function useInstall() {
+  const [prompt, setPrompt] = useState(() => window.__installPrompt ?? null);
+  const [installed, setInstalled] = useState(
+    () =>
+      window.matchMedia("(display-mode: standalone)").matches ||
+      window.navigator.standalone === true
+  );
+
+  useEffect(() => {
+    const offer = (event) => {
+      event.preventDefault();
+      setPrompt(event);
+    };
+    const done = () => {
+      setPrompt(null);
+      setInstalled(true);
+    };
+    window.addEventListener("beforeinstallprompt", offer);
+    window.addEventListener("appinstalled", done);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", offer);
+      window.removeEventListener("appinstalled", done);
+    };
+  }, []);
+
+  const install = useCallback(async () => {
+    if (!prompt) return;
+    prompt.prompt();
+    const { outcome } = await prompt.userChoice;
+    // The event is single-use whichever way it went; a dismissed prompt is
+    // offered again on the next visit, not by this same object.
+    window.__installPrompt = null;
+    setPrompt(null);
+    if (outcome === "accepted") setInstalled(true);
+  }, [prompt]);
+
+  const ios =
+    /iphone|ipad|ipod/i.test(window.navigator.userAgent) ||
+    (window.navigator.platform === "MacIntel" && window.navigator.maxTouchPoints > 1);
+
+  return { can: Boolean(prompt) && !installed, installed, ios, install };
+}
+
 function App() {
   const mapRef = useRef(null);
   const radarLayerRef = useRef(null);
@@ -814,6 +872,9 @@ function App() {
     load();
   }
 
+  const app = useInstall();
+  const [iosHint, setIosHint] = useState(false);
+
   useEffect(() => {
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
@@ -849,6 +910,20 @@ function App() {
           <div className="sub">{loc.name}</div>
         </div>
         <div className="tools">
+          {app.can && (
+            <button className="install" onClick={app.install}>
+              ติดตั้งแอป
+            </button>
+          )}
+          {!app.can && !app.installed && app.ios && (
+            <button
+              className="install"
+              onClick={() => setIosHint((open) => !open)}
+              aria-expanded={iosHint}
+            >
+              ติดตั้งแอป
+            </button>
+          )}
           <button onClick={locate} aria-label="ใช้ตำแหน่งของฉัน">
             📍
           </button>
@@ -862,6 +937,13 @@ function App() {
           </button>
         </div>
       </header>
+
+      {iosHint && (
+        <div className="ios-hint">
+          iOS ติดตั้งจาก Safari เท่านั้น — แตะ <b>แชร์</b> ที่แถบล่าง แล้วเลือก{" "}
+          <b>เพิ่มไปยังหน้าจอโฮม</b>
+        </div>
+      )}
 
       <section className={`answer ${summary.now.key}`}>
         {busy && !station && !drift?.ok ? (

@@ -86,6 +86,35 @@ header {
   opacity: 0.45;
 }
 
+/*
+ * Wider than the icon buttons because it carries a word, and accented because
+ * it appears at most once — the browser withdraws the offer once the app is
+ * installed.
+ */
+.tools button.install {
+  width: auto;
+  padding: 0 14px;
+  background: var(--accent);
+  font-size: 14px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.ios-hint {
+  margin: 0 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.ios-hint b {
+  color: var(--ink);
+}
+
 /* Answer card ------------------------------------------------------------- */
 
 .answer {

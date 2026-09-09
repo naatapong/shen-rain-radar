@@ -117,6 +117,28 @@ network-first — cache-first saves a few milliseconds and pins an installed app
 to whichever build was current when the service worker installed, which is how a
 PWA ends up serving a version nobody can update out of.
 
+The header carries its own **ติดตั้งแอป** button rather than leaving the user to
+find the browser's — a menu item on Android, a small address-bar glyph on
+desktop. Chrome only hands over the `beforeinstallprompt` event that button
+needs once it has accepted the manifest and the service worker, so the button
+appearing *is* the installability check: if it is missing, the browser would not
+have offered to install the app either. Safari never fires the event, so iOS
+gets the Share → เพิ่มไปยังหน้าจอโฮม instruction instead of a button that could
+not do anything.
+
+Manifest icons are PNG at 192 and 512, plus maskable variants for the Android
+launcher crop, with the SVGs kept last for displays that can use them. Chrome
+will not install an app whose only icons are SVG, and iOS ignores the manifest
+entirely: `apple-touch-icon` has to be a raster or the home screen shows a
+screenshot of the page. `public/icon-apple.svg` is the source those PNGs are
+rendered from — full-bleed, because iOS rounds the corners itself.
+
+Installing needs a secure context. `localhost` counts; the LAN address that
+`vite dev --host` prints does not, so a phone pointed at `http://192.168.x.x`
+will never offer to install however correct the manifest is. Test installs
+against `npm run preview` on the machine itself, or against the deployed
+Pages URL.
+
 ## Test
 
 ```bash

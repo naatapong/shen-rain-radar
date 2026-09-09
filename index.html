@@ -10,12 +10,29 @@
     />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
-    <!-- iOS ignores the manifest icons and reads this instead. -->
-    <link rel="apple-touch-icon" href="/icon.svg" />
+    <link rel="icon" href="/icon-192.png" type="image/png" sizes="192x192" />
+    <!--
+      iOS ignores the manifest icons and reads this instead, and it will not
+      read an SVG here — an SVG apple-touch-icon leaves the home screen with a
+      screenshot of the page instead of the icon.
+    -->
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Shen Radar" />
     <title>SHEN RAIN RADAR</title>
+    <!--
+      Chrome fires beforeinstallprompt as soon as it has accepted the manifest,
+      which can be before the bundle has parsed. Parking it here means the
+      install button still appears when that happens.
+    -->
+    <script>
+      window.addEventListener("beforeinstallprompt", function (event) {
+        event.preventDefault();
+        window.__installPrompt = event;
+      });
+    </script>
   </head>
   <body>
     <div id="root"></div>

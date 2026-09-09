@@ -1,0 +1,8 @@
+<!--
+  iOS variant. Safari ignores the manifest and this file, and it must be a
+  raster: apple-touch-icon.png is generated from here. iOS rounds the corners
+  itself, so the background bleeds to the edge — icon.svg's own rx would round
+  twice — and the artwork sits at 80%, tighter than the Android maskable crop
+  because iOS only clips the corners, not to a circle.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" fill="#0b1220"/><g transform="translate(51 51) scale(0.8)"><path d="M152 302c-37 0-67-29-67-66 0-34 25-62 58-66 18-51 67-86 123-86 67 0 123 50 132 115 25 5 44 27 44 54 0 31-25 56-56 56H152z" fill="#4bb3f5"/><path d="M205 337l-18 51M266 337l-18 51M327 337l-18 51" stroke="#ffd166" stroke-width="22" stroke-linecap="round"/></g></svg>

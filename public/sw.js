@@ -12,8 +12,15 @@
  * a PWA ends up serving a version nobody can update out of.
  */
 
-const CACHE = "shen-rain-radar-v2";
-const SHELL = ["/", "/index.html", "/manifest.webmanifest", "/icon.svg"];
+const CACHE = "shen-rain-radar-v3";
+const SHELL = [
+  "/",
+  "/index.html",
+  "/manifest.webmanifest",
+  "/icon.svg",
+  "/icon-192.png",
+  "/icon-512.png",
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
