@@ -164,6 +164,29 @@ test("a nearby gauge is the headline, because it is a measurement", () => {
   assert.equal(summary.now.key, "moderate");
 });
 
+/*
+ * The bug this guards: the gauge publishes an hourly accumulation, so at the
+ * onset of rain a nearby station still reads 0.0. It used to carry the headline
+ * anyway, which printed "no rain" directly above a radar strip drawing rain.
+ */
+test("a dry gauge cannot outrank radar echo overhead", () => {
+  const summary = summarise({ mmPerHour: 0, km: 3 }, null, {
+    ok: true,
+    now: { key: "light", label: "ฝนเบา" },
+  });
+  assert.equal(summary.basis, "radar");
+  assert.equal(summary.now.key, "light");
+});
+
+test("a nearby gauge still wins when the radar sees nothing", () => {
+  const summary = summarise({ mmPerHour: 0, km: 3 }, null, {
+    ok: true,
+    now: { key: "dry", label: "ไม่มีฝน" },
+  });
+  assert.equal(summary.basis, "station");
+  assert.equal(summary.now.key, "dry");
+});
+
 test("a far gauge hands the headline to the radar overhead", () => {
   const summary = summarise(
     { mmPerHour: 5, km: STATION_NEAR_KM + 10 },

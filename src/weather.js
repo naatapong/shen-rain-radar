@@ -121,9 +121,23 @@ export function summarise(station, forecast, drift) {
   const radarNow = drift?.ok ? drift.now : null;
   const modelRate = forecast?.series?.[0]?.mmPerHour;
 
+  /*
+   * A gauge reading of zero is not evidence that it is dry right now. Thaiwater
+   * publishes `rain_1h`, an accumulation over the hour that just ended, once an
+   * hour — so at the onset of rain the nearest gauge still reports 0.0 while the
+   * radar pixel overhead already holds echo. Letting the gauge win there put
+   * "no rain" at the top of a card whose own radar strip was drawing rain.
+   *
+   * So the near gauge carries the headline while it is wet, and hands over to
+   * the radar when the two disagree about whether it is raining at all.
+   */
+  const stationWet = stationRate !== null && rate(stationRate).key !== "dry";
+  const radarWet = Boolean(radarNow) && radarNow.key !== "dry";
+  const gaugeOutranked = radarWet && !stationWet;
+
   let now;
   let basis;
-  if (stationRate !== null && stationNear) {
+  if (stationRate !== null && stationNear && !gaugeOutranked) {
     now = rate(stationRate);
     basis = "station";
   } else if (radarNow) {
